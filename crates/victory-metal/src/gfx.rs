@@ -869,6 +869,49 @@ impl Metal {
                     let o = off(dst.0, dst.1);
                     e.fillBuffer_range_value(&dst.0.buf, NSRange::new(o, *len), *value);
                 }
+                BlitOp::CopyTexture { src, dst } => {
+                    // SAFETY: both Metal textures are live for the pass.
+                    unsafe { e.copyFromTexture_toTexture(&src.tex, &dst.tex) };
+                }
+                BlitOp::CopyTextureRegion {
+                    src,
+                    dst,
+                    src_slice,
+                    src_level,
+                    src_origin,
+                    size,
+                    dst_slice,
+                    dst_level,
+                    dst_origin,
+                } => {
+                    // SAFETY: the caller resolved one live texture per side and a
+                    // box inside them (D3D12 validates the region before this).
+                    unsafe {
+                        e.copyFromTexture_sourceSlice_sourceLevel_sourceOrigin_sourceSize_toTexture_destinationSlice_destinationLevel_destinationOrigin(
+                            &src.tex,
+                            *src_slice as usize,
+                            *src_level as usize,
+                            MTLOrigin {
+                                x: src_origin[0] as usize,
+                                y: src_origin[1] as usize,
+                                z: src_origin[2] as usize,
+                            },
+                            MTLSize {
+                                width: size[0] as usize,
+                                height: size[1] as usize,
+                                depth: size[2] as usize,
+                            },
+                            &dst.tex,
+                            *dst_slice as usize,
+                            *dst_level as usize,
+                            MTLOrigin {
+                                x: dst_origin[0] as usize,
+                                y: dst_origin[1] as usize,
+                                z: dst_origin[2] as usize,
+                            },
+                        )
+                    };
+                }
             }
         }
         if let Some((f, started)) = order {

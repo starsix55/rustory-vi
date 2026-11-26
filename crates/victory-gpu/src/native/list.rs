@@ -207,6 +207,23 @@ pub enum Cmd<B: GraphicsBackend> {
         len: usize,
         value: u8,
     },
+    /// `CopyResource` between textures.
+    CopyTexture {
+        dst: usize,
+        src: usize,
+    },
+    /// `CopyTextureRegion` between textures.
+    CopyTextureRegion {
+        dst: usize,
+        src: usize,
+        dst_slice: u32,
+        dst_level: u32,
+        dst_origin: [u32; 3],
+        src_slice: u32,
+        src_level: u32,
+        src_origin: [u32; 3],
+        size: [u32; 3],
+    },
     Clear {
         color: Option<(Rc<B::Texture>, [f32; 4])>,
         depth: Option<(Rc<B::Texture>, f32)>,
@@ -248,6 +265,31 @@ impl<B: GraphicsBackend> Clone for Cmd<B> {
                 dst: *dst,
                 len: *len,
                 value: *value,
+            },
+            Cmd::CopyTexture { dst, src } => Cmd::CopyTexture {
+                dst: *dst,
+                src: *src,
+            },
+            Cmd::CopyTextureRegion {
+                dst,
+                src,
+                dst_slice,
+                dst_level,
+                dst_origin,
+                src_slice,
+                src_level,
+                src_origin,
+                size,
+            } => Cmd::CopyTextureRegion {
+                dst: *dst,
+                src: *src,
+                dst_slice: *dst_slice,
+                dst_level: *dst_level,
+                dst_origin: *dst_origin,
+                src_slice: *src_slice,
+                src_level: *src_level,
+                src_origin: *src_origin,
+                size: *size,
             },
             Cmd::Clear { color, depth } => Cmd::Clear {
                 color: color.clone(),
@@ -304,6 +346,46 @@ fn set<B: GraphicsBackend>(root: &mut Vec<Option<Root<B>>>, slot: usize, value: 
         root.resize_with(slot + 1, || None);
     }
     root[slot] = Some(value);
+}
+
+impl<B: GraphicsBackend> NativeList<B> {
+    /// `CopyResource` between textures; resolved at submission.
+    pub fn copy_texture(&mut self, dst: usize, src: usize) {
+        if std::env::var_os("VICTORY_TRACE_TEXTURE_COPIES").is_some() {
+            tracing::info!(dst = format!("{dst:#x}"), src = format!("{src:#x}"), "texture copy recorded");
+        }
+        self.cmds.push(Cmd::CopyTexture { dst, src });
+    }
+
+    /// `CopyTextureRegion` between textures; resolved at submission.
+    #[allow(clippy::too_many_arguments)]
+    pub fn copy_texture_region(
+        &mut self,
+        dst: usize,
+        src: usize,
+        dst_slice: u32,
+        dst_level: u32,
+        dst_origin: [u32; 3],
+        src_slice: u32,
+        src_level: u32,
+        src_origin: [u32; 3],
+        size: [u32; 3],
+    ) {
+        if std::env::var_os("VICTORY_TRACE_TEXTURE_COPIES").is_some() {
+            tracing::info!(dst = format!("{dst:#x}"), src = format!("{src:#x}"), ?size, "texture region copy recorded");
+        }
+        self.cmds.push(Cmd::CopyTextureRegion {
+            dst,
+            src,
+            dst_slice,
+            dst_level,
+            dst_origin,
+            src_slice,
+            src_level,
+            src_origin,
+            size,
+        });
+    }
 }
 
 impl<B: GraphicsBackend> Default for NativeList<B> {

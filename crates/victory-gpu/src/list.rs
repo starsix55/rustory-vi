@@ -737,13 +737,15 @@ extern "system" fn copy_resource(this: This, dst: This, src: This) {
         }
     }
     #[cfg(target_os = "macos")]
-    if let (Some((to, a)), Some((from, b))) = (
+    if crate::resource::texture_info(dst).is_some() && crate::resource::texture_info(src).is_some() {
+        let mut list = native(this).lock().unwrap_or_else(|e| e.into_inner());
+        list.list.copy_texture(dst as usize, src as usize);
+    } else if let (Some((to, a)), Some((from, b))) = (
         crate::resource::buffer_bytes(dst),
         crate::resource::buffer_bytes(src),
     ) {
         crate::native::glue::copy_memory(this, to as u64, from as u64, a.min(b));
     } else {
-        #[cfg(target_os = "macos")]
         crate::native::glue::dropped_op("CopyResource", dst, src);
     }
     #[cfg(not(any(windows, target_os = "macos")))]
@@ -779,7 +781,36 @@ extern "system" fn copy_texture_region(
     #[cfg(target_os = "macos")]
     // SAFETY: the title passes both locations (null is tolerated).
     if let (Some(d), Some(s)) = unsafe { (dst.as_ref(), src.as_ref()) } {
-        crate::native::glue::dropped_op("CopyTextureRegion", d.resource, s.resource);
+        // Type 0 is a subresource index in the union; type 1 is a placed
+        // footprint (buffer target/source), which this path does not take.
+        if d.kind == 0 && s.kind == 0 {
+            let box_ = unsafe { source_box.as_ref() }
+                .copied()
+                .unwrap_or([0, 0, 0, u32::MAX, u32::MAX, u32::MAX]);
+            let size = [
+                box_[3].saturating_sub(box_[0]),
+                box_[4].saturating_sub(box_[1]),
+                box_[5].saturating_sub(box_[2]),
+            ];
+            if size.iter().all(|&n| n > 0 && n != u32::MAX) {
+                let mut list = native(this).lock().unwrap_or_else(|e| e.into_inner());
+                list.list.copy_texture_region(
+                    d.resource as usize,
+                    s.resource as usize,
+                    d.footprint.offset as u32,
+                    0,
+                    [x, y, z],
+                    s.footprint.offset as u32,
+                    0,
+                    [box_[0], box_[1], box_[2]],
+                    size,
+                );
+            } else {
+                crate::native::glue::dropped_op("CopyTextureRegion", d.resource, s.resource);
+            }
+        } else {
+            crate::native::glue::dropped_op("CopyTextureRegion", d.resource, s.resource);
+        }
     }
     #[cfg(windows)]
     {

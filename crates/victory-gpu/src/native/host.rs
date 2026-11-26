@@ -68,8 +68,28 @@ struct Prep<B: GraphicsBackend> {
     vertex: Vec<(Rc<B::Buffer>, *const u8)>,
     index: Option<(Rc<B::Buffer>, *const u8)>,
     blit: Vec<(Rc<B::Buffer>, *const u8)>,
+    texture: Option<TextureOp<B>>,
     /// The resource heap the work needs in place of the one the title bound (none bound).
     heap: Option<Rc<NativeHeap<B>>>,
+}
+
+/// A texture copy resolved from the title's resource objects at submission.
+enum TextureOp<B: GraphicsBackend> {
+    Copy {
+        src: Rc<B::Texture>,
+        dst: Rc<B::Texture>,
+    },
+    Region {
+        src: Rc<B::Texture>,
+        dst: Rc<B::Texture>,
+        src_slice: u32,
+        src_level: u32,
+        src_origin: [u32; 3],
+        size: [u32; 3],
+        dst_slice: u32,
+        dst_level: u32,
+        dst_origin: [u32; 3],
+    },
 }
 
 enum Group {
@@ -115,6 +135,14 @@ impl<B: GraphicsBackend> NativeHost<B> {
     /// The table the pool observer keeps current; register it as (or call it from) the observer.
     pub fn memory(&self) -> Arc<PoolTable> {
         self.memory.clone()
+    }
+
+    /// The host texture of title resource `key`, if the title realized it.
+    fn texture_resource(&self, key: usize) -> Result<Rc<B::Texture>, String> {
+        match self.resources.borrow().get(&key) {
+            Some(Res::Texture(t)) => Ok(t.clone()),
+            _ => Err(format!("texture resource {key:#x} is not realized")),
+        }
     }
 
     /// The buffer and pool-mapping address of `[addr, addr + len)` of title memory.
@@ -764,6 +792,7 @@ impl<B: GraphicsBackend> NativeHost<B> {
             vertex: vec![],
             index: None,
             blit: vec![],
+            texture: None,
             heap: None,
         };
         match cmd {
@@ -844,6 +873,35 @@ impl<B: GraphicsBackend> NativeHost<B> {
                 p.blit.push(self.resolve(*dst, *len as u64)?);
             }
             Cmd::Fill { dst, len, .. } => p.blit.push(self.resolve(*dst, *len as u64)?),
+            Cmd::CopyTexture { dst, src } => {
+                p.texture = Some(TextureOp::Copy {
+                    src: self.texture_resource(*src)?,
+                    dst: self.texture_resource(*dst)?,
+                });
+            }
+            Cmd::CopyTextureRegion {
+                dst,
+                src,
+                dst_slice,
+                dst_level,
+                dst_origin,
+                src_slice,
+                src_level,
+                src_origin,
+                size,
+            } => {
+                p.texture = Some(TextureOp::Region {
+                    src: self.texture_resource(*src)?,
+                    dst: self.texture_resource(*dst)?,
+                    src_slice: *src_slice,
+                    src_level: *src_level,
+                    src_origin: *src_origin,
+                    size: *size,
+                    dst_slice: *dst_slice,
+                    dst_level: *dst_level,
+                    dst_origin: *dst_origin,
+                });
+            }
             Cmd::Clear { .. } => {}
         }
         Ok(p)
@@ -871,6 +929,8 @@ impl<B: GraphicsBackend> NativeHost<B> {
             let same = |a: &Cmd<B>, b: &Cmd<B>| match (a, b) {
                 (Cmd::Dispatch { .. }, Cmd::Dispatch { .. }) => true,
                 (Cmd::Copy { .. } | Cmd::Fill { .. }, Cmd::Copy { .. } | Cmd::Fill { .. }) => true,
+                (Cmd::CopyTexture { .. }, Cmd::CopyTexture { .. }) => true,
+                (Cmd::CopyTextureRegion { .. }, Cmd::CopyTextureRegion { .. }) => true,
                 (Cmd::Draw { targets: x, .. }, Cmd::Draw { targets: y, .. }) => x.same(y),
                 _ => false,
             };
@@ -880,6 +940,7 @@ impl<B: GraphicsBackend> NativeHost<B> {
             groups.push(match cmds[i] {
                 Cmd::Dispatch { .. } => Group::Compute(i, j),
                 Cmd::Copy { .. } | Cmd::Fill { .. } => Group::Blit(i, j),
+                Cmd::CopyTexture { .. } | Cmd::CopyTextureRegion { .. } => Group::Blit(i, j),
                 Cmd::Draw { .. } => Group::Render(i, j),
                 Cmd::Clear { .. } => {
                     j = i + 1;
@@ -958,6 +1019,37 @@ impl<B: GraphicsBackend> NativeHost<B> {
                                     value: *value,
                                 }
                             }
+                            Cmd::CopyTexture { .. } => match preps[k].texture.as_ref() {
+                                Some(TextureOp::Copy { src, dst }) => BlitOp::CopyTexture {
+                                    src: &**src,
+                                    dst: &**dst,
+                                },
+                                _ => unreachable!(),
+                            },
+                            Cmd::CopyTextureRegion { .. } => match preps[k].texture.as_ref() {
+                                Some(TextureOp::Region {
+                                    src,
+                                    dst,
+                                    src_slice,
+                                    src_level,
+                                    src_origin,
+                                    size,
+                                    dst_slice,
+                                    dst_level,
+                                    dst_origin,
+                                }) => BlitOp::CopyTextureRegion {
+                                    src: &**src,
+                                    dst: &**dst,
+                                    src_slice: *src_slice,
+                                    src_level: *src_level,
+                                    src_origin: *src_origin,
+                                    size: *size,
+                                    dst_slice: *dst_slice,
+                                    dst_level: *dst_level,
+                                    dst_origin: *dst_origin,
+                                },
+                                _ => unreachable!(),
+                            },
                             _ => unreachable!(),
                         })
                         .collect(),

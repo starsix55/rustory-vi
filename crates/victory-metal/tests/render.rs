@@ -206,6 +206,64 @@ fn triangle_offscreen() {
 }
 
 #[test]
+fn texture_copy_and_region_offscreen() {
+    let Some(m) = backend() else { return };
+    let desc = TextureDesc::d2(Format::Rgba8Unorm, 4, 4);
+    let src = m.create_texture(&desc).unwrap();
+    let dst = m.create_texture(&desc).unwrap();
+    let pattern: Vec<u8> = (0..4 * 4 * 4).map(|i| (i as u8).wrapping_mul(7)).collect();
+    m.upload_texture(&src, 0, 0, &pattern, 16, 64);
+    m.upload_texture(&dst, 0, 0, &[0u8; 4 * 4 * 4], 16, 64);
+
+    let q = m.create_queue().unwrap();
+    let f = m.create_fence(0).unwrap();
+    m.submit_passes(
+        &q,
+        &PassSubmission {
+            waits: &[],
+            passes: &[Pass::Blit(vec![BlitOp::CopyTexture {
+                src: &src,
+                dst: &dst,
+            }])],
+            signals: &[(&f, 1)],
+        },
+    )
+    .unwrap();
+    assert!(m.wait(&f, 1, 10_000), "copy did not finish");
+    let mut out = vec![0u8; 4 * 4 * 4];
+    m.read_texture(&dst, 0, 0, &mut out, 16, 64);
+    assert_eq!(out, pattern, "whole-resource copy");
+
+    m.upload_texture(&dst, 0, 0, &[0u8; 4 * 4 * 4], 16, 64);
+    m.submit_passes(
+        &q,
+        &PassSubmission {
+            waits: &[],
+            passes: &[Pass::Blit(vec![BlitOp::CopyTextureRegion {
+                src: &src,
+                dst: &dst,
+                src_slice: 0,
+                src_level: 0,
+                src_origin: [1, 1, 0],
+                size: [2, 2, 1],
+                dst_slice: 0,
+                dst_level: 0,
+                dst_origin: [0, 0, 0],
+            }])],
+            signals: &[(&f, 2)],
+        },
+    )
+    .unwrap();
+    assert!(m.wait(&f, 2, 10_000), "region copy did not finish");
+    m.read_texture(&dst, 0, 0, &mut out, 16, 64);
+    let at = |x: usize, y: usize| &out[(y * 4 + x) * 4..][..4];
+    let src_at = |x: usize, y: usize| &pattern[(y * 4 + x) * 4..][..4];
+    assert_eq!(at(0, 0), src_at(1, 1), "region origin");
+    assert_eq!(at(1, 1), src_at(2, 2), "region extent");
+    assert_eq!(at(2, 2), [0, 0, 0, 0], "outside the region stays clear");
+}
+
+#[test]
 fn indexed_draw_with_depth_test_and_depth_sampling() {
     let Some(m) = backend() else { return };
     let s = Scene::new(&m, Some((true, Compare::Less)));
