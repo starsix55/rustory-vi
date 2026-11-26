@@ -130,22 +130,19 @@ pub fn upload<B: ResourceBackend>(
     let host_format = info.desc().map(|d| d.format);
     for mip in 0..layout.mips.len() as u32 {
         let m = &layout.mips[mip as usize];
-        let detiled_row = m.width as usize * n;
-        // Metal requires bytesPerRow to cover the full host row. Some console
-        // layouts have a tighter element pitch than the host format; pad the
-        // destination stride rather than letting `replaceRegion` assert.
-        let host_row = host_format.map_or(0, |f| f.row_bytes(m.width as usize));
-        let row = detiled_row.max(host_row);
-        if host_row > detiled_row {
+        let row = m.width as usize * n;
+        if std::env::var_os("VICTORY_TRACE_UPLOAD").is_some() {
             static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-            if N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 8 {
-                tracing::warn!(
+            if N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 64 {
+                tracing::info!(
                     format = info.format,
                     ?host_format,
                     width = m.width,
-                    detiled_row,
-                    host_row,
-                    "host texture row pitch padded"
+                    height = m.height,
+                    mip,
+                    row,
+                    element_bytes = n,
+                    "texture upload"
                 );
             }
         }
@@ -451,10 +448,9 @@ impl<B: PresentBackend> Title<B> {
             }
         }
         unique.sort_unstable();
-        let (mut overlaps, mut overlap_bytes, mut max_end) = (0, 0, 0);
+        let (mut overlap_bytes, mut max_end) = (0, 0);
         for &(at, size, _) in &unique {
             if at < max_end {
-                overlaps += 1;
                 overlap_bytes += size.min(max_end - at);
             }
             max_end = max_end.max(at + size);

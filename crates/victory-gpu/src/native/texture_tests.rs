@@ -345,3 +345,32 @@ fn present_draws_the_back_buffer_over_the_apps_layer() {
     );
     drop(layer);
 }
+
+/// A depth/stencil console texture has a 4-byte depth plane. Metal's
+/// `replaceRegion` on D32FloatS8 takes that depth-plane row (4 bytes/texel),
+/// not an expanded 8-byte host row; the stencil plane is not uploaded.
+#[test]
+fn a_depth_stencil_texture_uploads_the_depth_plane() {
+    let Some(pool) = pool(9107, 4) else { return };
+    let res = crate::resource::test_texture_at(pool.va(0), (16, 16), 1, 19, Swizzle::LINEAR.0, 0);
+    let info = crate::resource::texture_info(res).unwrap();
+    assert_eq!(info.layout.desc.element_bytes, 4, "console depth plane is four bytes");
+    assert_eq!(info.desc().unwrap().format, Format::D32FloatS8);
+    tile(&pool, 0, &info.layout);
+    let key = res as usize;
+    let out = with_title(|t| {
+        assert!(t.realize(key));
+        t.sync_textures();
+        let tex = t.texture_of(key).unwrap();
+        let mut out = vec![0u8; 16 * 16 * 4];
+        t.host
+            .backend
+            .read_texture(&tex, 0, 0, &mut out, 16 * 4, 16 * 16 * 4);
+        out
+    })
+    .unwrap();
+    for (x, y) in [(0, 0), (9, 5), (15, 15)] {
+        let at = (y * 16 + x) * 4;
+        assert_eq!(&out[at..at + 4], &texel(0, x as u32, y as u32), "depth at {x},{y}");
+    }
+}

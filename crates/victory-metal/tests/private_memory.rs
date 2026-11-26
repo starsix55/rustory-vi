@@ -223,3 +223,47 @@ fn format_view_compatibility() {
         println!("{base:?} -> {view:?}: {}", if made.is_ok() { "view" } else { "refused" });
     }
 }
+
+#[test]
+#[ignore = "Metal depth format probe"]
+fn depth32_roundtrip() {
+    use victory_backend::resources::{Format, ResourceBackend, TextureDesc};
+    let metal = victory_metal::metal::Metal::new().expect("Metal");
+    let tex = metal
+        .create_texture(&TextureDesc::d2(Format::D32Float, 16, 16))
+        .expect("texture");
+    let mut data = vec![0u8; 16 * 16 * 4];
+    for y in 0..16 {
+        for x in 0..16 {
+            let at = (y * 16 + x) * 4;
+            data[at..at + 4].copy_from_slice(&(x as f32).to_le_bytes());
+        }
+    }
+    metal.upload_texture(&tex, 0, 0, &data, 16 * 4, 16 * 16 * 4);
+    let mut out = vec![0u8; data.len()];
+    metal.read_texture(&tex, 0, 0, &mut out, 16 * 4, 16 * 16 * 4);
+    assert_eq!(out, data, "depth32 roundtrip");
+}
+
+#[test]
+#[ignore = "Metal depth/stencil plane probe"]
+fn depth_stencil_depth_plane_roundtrip() {
+    use victory_backend::resources::{Format, ResourceBackend, TextureDesc};
+    let metal = victory_metal::metal::Metal::new().expect("Metal");
+    let tex = metal
+        .create_texture(&TextureDesc::d2(Format::D32FloatS8, 16, 16))
+        .expect("texture");
+    let mut data = vec![0u8; 16 * 16 * 4];
+    for y in 0..16 {
+        for x in 0..16 {
+            let at = (y * 16 + x) * 4;
+            data[at..at + 4].copy_from_slice(&(x as f32).to_le_bytes());
+        }
+    }
+    metal.upload_texture(&tex, 0, 0, &data, 16 * 4, 16 * 16 * 4);
+    let mut out = vec![0u8; data.len()];
+    metal.read_texture(&tex, 0, 0, &mut out, 16 * 4, 16 * 16 * 4);
+    println!("plane data {:?}", &data[..64]);
+    println!("plane out  {:?}", &out[..64]);
+    assert_eq!(out, data, "depth plane roundtrip");
+}
