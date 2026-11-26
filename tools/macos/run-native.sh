@@ -79,10 +79,12 @@ if [[ -n "${VICTORY_SWAP_LIMIT_MB:-}" ]]; then
       used=${used%.*}
       if [[ "$used" =~ ^[0-9]+$ ]] && (( used > VICTORY_SWAP_LIMIT_MB )); then
         echo "swap guard: system swap ${used} MiB > ${VICTORY_SWAP_LIMIT_MB} MiB; stopping the run" >> "$log"
-        kill "$pid" 2>/dev/null
+        kill -TERM "$pid" 2>/dev/null
+        sleep 1
+        kill -KILL "$pid" 2>/dev/null
         break
       fi
-      sleep 2
+      sleep 0.5
     done
   ) &
   guard=$!
