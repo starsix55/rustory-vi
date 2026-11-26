@@ -587,6 +587,15 @@ impl<B: PresentBackend> Title<B> {
                     metal_headroom = usage.recommended.saturating_sub(usage.allocated),
                     "host memory"
                 );
+                for (id, len, resident) in self.host.pool_residency().into_iter().take(4) {
+                    tracing::info!(
+                        frame,
+                        pool = format_args!("{id:#x}"),
+                        len,
+                        resident,
+                        "guest pool residency"
+                    );
+                }
                 let (kinds, top) = self.breakdown();
                 for age in [60u64, 600] {
                     let (heaps, entries, keys) = self.host.stale_heaps(age);

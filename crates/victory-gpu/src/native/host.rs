@@ -541,6 +541,11 @@ impl<B: GraphicsBackend> NativeHost<B> {
         self.memory.resident_bytes()
     }
 
+    /// Per-pool virtual/resident bytes, largest resident first.
+    pub fn pool_residency(&self) -> Vec<(usize, usize, usize)> {
+        self.memory.residency()
+    }
+
     /// Bytes of descriptor-heap buffers the host allocated. These are host
     /// memory, not guest, and are part of `currentAllocatedSize`.
     pub fn descriptor_heap_bytes(&self) -> u64 {

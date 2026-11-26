@@ -161,6 +161,25 @@ impl PoolTable {
         0
     }
 
+    /// Per-pool residency: `(pool id, virtual length, resident bytes)`,
+    /// largest first. macOS only for the resident part.
+    #[cfg(target_os = "macos")]
+    pub fn residency(&self) -> Vec<(usize, usize, usize)> {
+        let g = self.lock();
+        let mut out: Vec<(usize, usize, usize)> = g
+            .pools
+            .values()
+            .map(|p| (p.id, p.len, victory_platform::mem::resident(p.base, p.len)))
+            .collect();
+        out.sort_by_key(|&(_, _, resident)| std::cmp::Reverse(resident));
+        out
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub fn residency(&self) -> Vec<(usize, usize, usize)> {
+        Vec::new()
+    }
+
     /// Pools released since the last call; the host drops their buffers.
     pub fn take_released(&self) -> Vec<usize> {
         std::mem::take(&mut self.lock().released)
