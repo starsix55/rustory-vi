@@ -609,8 +609,9 @@ impl<B: PresentBackend> Title<B> {
         let mut total: usize = 0;
         for t in self.textures.values() {
             // A UAV's contents may have been written through a descriptor this
-            // host cannot attribute yet, so it stays pinned.
-            if t.gpu_written || t.info.flags & UNORDERED_ACCESS != 0 {
+            // host cannot attribute yet, so it stays pinned. Hot textures (a
+            // movie plane, a glyph cache) keep their synchronous probe state.
+            if t.gpu_written || t.info.flags & UNORDERED_ACCESS != 0 || t.hot > 0 {
                 continue;
             }
             let ptr = Rc::as_ptr(&t.texture) as usize;
@@ -628,7 +629,7 @@ impl<B: PresentBackend> Title<B> {
             .textures
             .iter()
             .filter(|(_, t)| {
-                if t.gpu_written || t.info.flags & UNORDERED_ACCESS != 0 {
+                if t.gpu_written || t.info.flags & UNORDERED_ACCESS != 0 || t.hot > 0 {
                     return false;
                 }
                 let ptr = Rc::as_ptr(&t.texture) as usize;
