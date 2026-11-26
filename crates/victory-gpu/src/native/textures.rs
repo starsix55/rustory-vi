@@ -342,9 +342,79 @@ impl<B: PresentBackend> Title<B> {
         self.textures.get(&key).map(|t| t.texture.clone())
     }
 
+    /// Host textures made, the bytes of title memory they duplicate, and how
+    /// many of those are linear textures that could be views of title memory.
+    pub fn resident(&self) -> (usize, usize, usize, usize) {
+        let mut linear = (0, 0);
+        for t in self.textures.values() {
+            if t.info.layout.desc.swizzle == victory_formats::texture::Swizzle::LINEAR {
+                linear.0 += 1;
+                linear.1 += t.info.size;
+            }
+        }
+        (
+            self.textures.len(),
+            self.textures.values().map(|t| t.info.size).sum(),
+            linear.0,
+            linear.1,
+        )
+    }
+
+    /// Host textures whose only strong references are this map and the
+    /// title-resource map (no live heap/view keeps them).
+    pub fn unreferenced(&self) -> usize {
+        self.textures
+            .values()
+            .filter(|t| Rc::strong_count(&t.texture) <= 2)
+            .count()
+    }
+
     /// How many times title texture `key`'s memory was detiled into its host texture.
     pub fn uploads_of(&self, key: usize) -> u64 {
         self.textures.get(&key).map_or(0, |t| t.uploads)
+    }
+
+    /// Gives up sampled host textures that no live heap or view references,
+    /// until their total is within `limit` bytes. Their title memory stays
+    /// authoritative; a later `realize` detiles them again.
+    pub fn evict_textures(&mut self, limit: usize) -> (usize, usize) {
+        let mut total: usize = self
+            .textures
+            .values()
+            .filter(|t| !t.info.render_target())
+            .map(|t| t.info.size)
+            .sum();
+        if total <= limit {
+            return (0, 0);
+        }
+        let candidates: Vec<usize> = self
+            .textures
+            .iter()
+            .filter(|(_, t)| {
+                !t.info.render_target() && Rc::strong_count(&t.texture) <= 2
+            })
+            .map(|(&k, _)| k)
+            .collect();
+        let (mut n, mut bytes) = (0, 0);
+        for key in candidates {
+            if total <= limit {
+                break;
+            }
+            let Some(t) = self.textures.remove(&key) else { continue };
+            let size = t.info.size;
+            self.pending.insert(key, t.info);
+            self.host.forget_resource(key);
+            self.unloaded.remove(&key);
+            self.hot_keys.retain(|&k| k != key);
+            watch(|w| {
+                w.entries.remove(&key);
+                w.dirty.remove(&key);
+            });
+            total = total.saturating_sub(size);
+            n += 1;
+            bytes += size;
+        }
+        (n, bytes)
     }
 
     pub fn texture_released(&mut self, key: usize) {
@@ -373,6 +443,21 @@ impl<B: PresentBackend> Title<B> {
     /// What a submission does: the textures not uploaded yet, and those the scanner or hot probe
     /// found changed since.
     pub fn sync_dirty(&mut self) {
+        // Host textures duplicate title memory. Sampled textures with no
+        // live heap/view reference are safe to give up; their title memory
+        // stays the source of truth (VICTORY_TEXTURE_BUDGET_MB, default 2048).
+        static BUDGET: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+        let limit = *BUDGET.get_or_init(|| {
+            std::env::var("VICTORY_TEXTURE_BUDGET_MB")
+                .ok()
+                .and_then(|v| v.trim().parse::<usize>().ok())
+                .unwrap_or(2048)
+                .saturating_mul(1024 * 1024)
+        });
+        let (evicted, freed) = self.evict_textures(limit);
+        if evicted > 0 && std::env::var_os("VICTORY_TRACE_TEXTURE_MEMORY").is_some() {
+            tracing::info!(evicted, freed, limit, "host texture budget eviction");
+        }
         let mut dirty = watch(|w| std::mem::take(&mut w.dirty));
         // Hot textures (a movie's planes, a glyph cache) are probed synchronously in O(1) bounded
         // batches so world streaming (thousands of blank textures) never stalls submissions.

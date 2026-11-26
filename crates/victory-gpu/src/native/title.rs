@@ -451,6 +451,21 @@ impl<B: PresentBackend> Title<B> {
     /// far as it ran); `Ok(false)` when there is no surface or the title has no such texture.
     pub fn present(&mut self, queue: usize, key: usize) -> Result<bool, String> {
         self.pump();
+        if std::env::var_os("VICTORY_TRACE_TEXTURE_MEMORY").is_some() {
+            let frame = crate::frame::current();
+            if frame.is_multiple_of(64) {
+                let (n, bytes, linear_n, linear_bytes) = self.resident();
+                tracing::info!(
+                    frame,
+                    textures = n,
+                    bytes,
+                    linear_n,
+                    linear_bytes,
+                    unreferenced = self.unreferenced(),
+                    "host textures resident"
+                );
+            }
+        }
         if self.surface.is_none() {
             return Ok(false);
         }
