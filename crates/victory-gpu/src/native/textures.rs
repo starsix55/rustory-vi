@@ -1052,6 +1052,21 @@ pub(super) fn realize_pending<B: PresentBackend>(
             let covered = pending.iter().filter(|&&i| access.covers(i)).count();
             stats.realize_required += covered as u64;
             stats.realize_deferred += pending.len().saturating_sub(covered) as u64;
+            if std::env::var_os("VICTORY_TRACE_REALIZE").is_some() && !pending.is_empty() {
+                static N: std::sync::atomic::AtomicU32 =
+                    std::sync::atomic::AtomicU32::new(0);
+                if N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 40 {
+                    tracing::info!(
+                        heap = format_args!("{:#x}", heap.start),
+                        whole = access.whole,
+                        ranges = ?access.ranges,
+                        pending = pending.len(),
+                        covered,
+                        entries = heap.keys.borrow().len(),
+                        "realize heap"
+                    );
+                }
+            }
         }
     }
 

@@ -86,7 +86,7 @@ pub enum View {
 
 impl Binding {
     pub fn of(shader: &victory_shader::emit::HostShader) -> Binding {
-        Binding {
+        let binding = Binding {
             dwords: shader.user_data_dwords() as usize,
             user_data: shader.user_data.clone(),
             views: shader
@@ -119,7 +119,18 @@ impl Binding {
                 .collect(),
             table_dynamic: shader.table_dynamic.clone(),
             heap: shader.heap,
+        };
+        if std::env::var_os("VICTORY_TRACE_REALIZE").is_some() {
+            tracing::info!(
+                table_entries = ?binding.table_entries,
+                table_dynamic = ?binding.table_dynamic,
+                heap = binding.heap,
+                views = binding.views.len(),
+                memory = binding.memory,
+                "shader table metadata"
+            );
         }
+        binding
     }
 
     /// The root signature the converter lays the argument buffer out by, in the order
