@@ -18,7 +18,7 @@
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::{CStr, c_char, c_void};
 #[cfg(windows)]
 use std::os::windows::fs::FileExt;
@@ -461,12 +461,13 @@ struct Lane {
     /// Enqueued, not yet submitted.
     unsubmitted: Vec<Command>,
     /// Left out when the queue submitted itself, until the title's Submit:
-    /// reads into physical pages and the status entries behind them.
-    held: Vec<Command>,
+    /// reads into physical pages and the commands behind them, keeping their
+    /// original submission sequence numbers.
+    held: Vec<(u64, Command)>,
     /// Submitted, by sequence number: reads not started, status entries
     /// not written, reads running, and failures not yet reported.
-    reads: VecDeque<(u64, Request)>,
-    statuses: VecDeque<(u64, Status)>,
+    reads: BTreeMap<u64, Request>,
+    statuses: BTreeMap<u64, Status>,
     running: BTreeSet<u64>,
     failures: BTreeMap<u64, HRESULT>,
     closed: bool,
@@ -629,17 +630,17 @@ impl Lanes {
         let (_, class) = busy().map(|(_, l)| (self.clock[l.class], l.class)).min()?;
         let (_, _, id) = busy()
             .filter(|(_, l)| l.class == class)
-            .filter_map(|(&id, l)| Some((l.clock, l.reads.front()?.0, id)))
+            .filter_map(|(&id, l)| Some((l.clock, *l.reads.first_key_value()?.0, id)))
             .min()?;
         let lane = self.lanes.get_mut(&id)?;
-        let &(seq, request) = lane.reads.front()?;
+        let (&seq, &request) = lane.reads.first_key_value()?;
         let staging = staging_bytes(&request);
         if self.staged > 0 && self.staged + staging > self.staging {
             self.starved = true;
             self.refused += 1;
             return None;
         }
-        lane.reads.pop_front();
+        lane.reads.pop_first();
         lane.running.insert(seq);
         self.staged += staging;
         let size = u64::from(request.destination_size.max(request.source_size)).max(1);
@@ -678,7 +679,8 @@ impl Lanes {
     /// Grand Theft Auto VI fills for the batch in its own submit path, right
     /// before Submit (`sub_1400e88f0`), so until then they name no page or a
     /// page that now holds something else. A status entry behind a held
-    /// read waits with it.
+    /// read waits with it, and reads behind a held status entry wait so they
+    /// cannot jump ahead of that fence.
     fn submit_as(&mut self, id: u64, explicit: bool) {
         let Some(class) = self.lanes.get(&id).map(|l| l.class) else {
             return;
@@ -703,22 +705,33 @@ impl Lanes {
         } else {
             Vec::new()
         };
-        commands.append(&mut lane.unsubmitted);
-        for command in commands {
+        for command in std::mem::take(&mut lane.unsubmitted) {
+            let seq = self.next_seq;
+            self.next_seq += 1;
+            commands.push((seq, command));
+        }
+        let mut held_status = lane
+            .held
+            .iter()
+            .any(|(_, c)| matches!(c, Command::Status(_)));
+        for (seq, command) in commands {
             let hold = !explicit
                 && match &command {
-                    Command::Read(r) => r.options & PAGE_DESTINATION != 0,
+                    Command::Read(r) => held_status || r.options & PAGE_DESTINATION != 0,
                     Command::Status(_) => !lane.held.is_empty(),
                 };
             if hold {
-                lane.held.push(command);
+                held_status |= matches!(command, Command::Status(_));
+                lane.held.push((seq, command));
                 continue;
             }
-            let seq = self.next_seq;
-            self.next_seq += 1;
             match command {
-                Command::Read(request) => lane.reads.push_back((seq, request)),
-                Command::Status(status) => lane.statuses.push_back((seq, status)),
+                Command::Read(request) => {
+                    lane.reads.insert(seq, request);
+                }
+                Command::Status(status) => {
+                    lane.statuses.insert(seq, status);
+                }
             }
         }
         lane.flush();
@@ -733,8 +746,8 @@ impl Lane {
             clock: 0,
             unsubmitted: Vec::new(),
             held: Vec::new(),
-            reads: VecDeque::new(),
-            statuses: VecDeque::new(),
+            reads: BTreeMap::new(),
+            statuses: BTreeMap::new(),
             running: BTreeSet::new(),
             failures: BTreeMap::new(),
             closed: false,
@@ -752,8 +765,8 @@ impl Lane {
 
     /// Writes the status entries whose earlier reads have all finished.
     fn flush(&mut self) {
-        while let Some(&(seq, _)) = self.statuses.front() {
-            let waiting = self.reads.front().map(|r| r.0);
+        while let Some((&seq, _)) = self.statuses.first_key_value() {
+            let waiting = self.reads.first_key_value().map(|(&s, _)| s);
             if waiting
                 .into_iter()
                 .chain(self.running.first().copied())
@@ -761,7 +774,7 @@ impl Lane {
             {
                 return;
             }
-            let Some((_, status)) = self.statuses.pop_front() else {
+            let Some((_, status)) = self.statuses.pop_first() else {
                 return;
             };
             let later = self.failures.split_off(&seq);
@@ -787,8 +800,9 @@ fn staging_bytes(request: &Request) -> u64 {
     }
 }
 
-/// Ends a queue: what was not started is dropped, and this waits for the
-/// reads already running (they write title memory).
+/// Ends a queue: what was enqueued but not submitted is dropped, and this
+/// waits until what was submitted has completed or failed, its status
+/// entries written, as the console's `Close` does.
 fn close_lane(id: u64) {
     let Some(scheduler) = scheduler() else {
         return;
@@ -800,9 +814,15 @@ fn close_lane(id: u64) {
     lane.closed = true;
     lane.unsubmitted.clear();
     lane.held.clear();
-    lane.reads.clear();
-    lane.statuses.clear(); // releases their arrays
-    while lanes.lanes.get(&id).is_some_and(|l| !l.running.is_empty()) {
+    tracing::info!(
+        id,
+        reads = lane.reads.len(),
+        statuses = lane.statuses.len(),
+        running = lane.running.len(),
+        "dstorage: closing a queue; waiting for submitted work"
+    );
+    let pending = |l: &Lane| !(l.reads.is_empty() && l.running.is_empty() && l.statuses.is_empty());
+    while lanes.lanes.get(&id).is_some_and(pending) {
         lanes = scheduler
             .finished
             .wait(lanes)
@@ -893,8 +913,20 @@ extern "system" fn enqueue_status(this: QueueRef, array: Array, index: u32) {
     queue(this, Command::Status(Status { array, index }));
 }
 
-/// Adds a command to the queue; blocks while the queue is full, and
-/// submits on its own once half of it is enqueued, as the console does.
+/// Whether a queue submits itself at half full. The title's batches can hold
+/// more than half of a 4,159-entry queue, and it maps the destination pages
+/// and fills their page lists in its own `Submit` after enqueuing them all.
+/// Submitting at half therefore starts page-destination reads on lists that
+/// are still page 0 or stale. Disabled by default; `VICTORY_DSTORAGE_HALF=1`
+/// restores the old PC-like behaviour for comparison.
+fn half_submits() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_DSTORAGE_HALF").is_some_and(|v| v == "1"))
+}
+
+/// Adds a command to the queue; blocks while the queue is full. A queue
+/// that is full of commands nobody submitted submits itself, since nothing
+/// else could make room.
 fn queue(this: QueueRef, command: Command) {
     // SAFETY: a queue we created and the title still holds.
     let id = unsafe { &*this }.state.id;
@@ -910,17 +942,19 @@ fn queue(this: QueueRef, command: Command) {
         if lane.entries() + 1 < lane.capacity.max(2) {
             break;
         }
-        // Full with reads held for a Submit the title cannot make while it
-        // waits here: they go now, page lists as they are.
-        if !lane.held.is_empty() {
+        // Full of commands nobody submitted: nothing else could make room.
+        // Their page lists may still be page 0; `into_destination` retries a
+        // late list, and a status entry behind one waits for the read.
+        if !lane.unsubmitted.is_empty() && lane.reads.is_empty() && lane.running.is_empty() {
             static WARNED: AtomicBool = AtomicBool::new(false);
             if !WARNED.swap(true, Ordering::Relaxed) {
                 tracing::warn!(
-                    "dstorage: a full queue's reads into physical pages start before the title's Submit"
+                    "dstorage: a full queue of commands nobody submitted submits itself"
                 );
             }
             lanes.submit(id);
             scheduler.work.notify_all();
+            continue;
         }
         lanes = scheduler
             .finished
@@ -931,7 +965,7 @@ fn queue(this: QueueRef, command: Command) {
         return;
     };
     lane.unsubmitted.push(command);
-    if lane.unsubmitted.len() >= (lane.capacity / 2).max(1) {
+    if half_submits() && lane.unsubmitted.len() >= (lane.capacity / 2).max(1) {
         let capacity = lane.capacity;
         lanes.submit_as(id, false);
         scheduler.work.notify_all();
@@ -964,9 +998,10 @@ extern "system" fn submit(this: QueueRef) {
     scheduler.work.notify_all();
 }
 
-/// Ends the queue whatever its reference count: what was not started never
-/// completes, and this returns once the reads already running have
-/// finished. Grand Theft Auto VI calls this, not `Release`.
+/// Ends the queue whatever its reference count: what was not submitted
+/// never completes, and this returns once everything submitted has
+/// completed or failed (a title may still be polling its status entries).
+/// Grand Theft Auto VI calls this, not `Release`.
 extern "system" fn close(this: QueueRef) {
     // SAFETY: as above.
     close_lane(unsafe { &*this }.state.id);
@@ -983,7 +1018,12 @@ fn execute(request: &Request) -> Result<(), HRESULT> {
         e.0 += 1;
         e.1 += u64::from(request.source_size);
         if e.0 == 1 || e.0.is_power_of_two() {
-            tracing::info!(file = name, requests = e.0, bytes = e.1, "dstorage: reads of a file so far");
+            tracing::info!(
+                file = name,
+                requests = e.0,
+                bytes = e.1,
+                "dstorage: reads of a file so far"
+            );
         }
     }
 
@@ -1167,23 +1207,29 @@ fn into_destination(
         return fill(out).map(drop);
     }
     let offset = (request.page_offset & 0xffff) as usize;
-    let count = (offset + len).div_ceil(PAGE);
-    // The title's page list, copied: the title may still be filling it
-    // (below), so each attempt is judged by the list it wrote through, not
-    // by a later read of it.
-    let list = || {
-        // SAFETY: the title passes a page number per 64 KiB of destination,
-        // which holds at least `len` bytes from `offset`.
-        unsafe { std::slice::from_raw_parts(request.destination.cast::<usize>(), count) }.to_vec()
+    let mut pages = vec![0usize; (offset + len).div_ceil(PAGE)];
+    let snapshot = |dst: &mut [usize]| {
+        let src = request.destination.cast::<usize>();
+        for (i, slot) in dst.iter_mut().enumerate() {
+            // SAFETY: the title passes a page number per 64 KiB of destination
+            // (aligned for `usize`, as the atomic load needs). An atomic load
+            // into a local buffer avoids creating a shared `&[usize]` slice
+            // over memory that a concurrent producer (compiled title x86-64
+            // aligned 64-bit stores, or atomic stores in Rust tests) may still
+            // be populating after submission.
+            *slot = unsafe {
+                std::sync::atomic::AtomicUsize::from_ptr(src.add(i)).load(Ordering::Acquire)
+            };
+        }
     };
+    snapshot(&mut pages);
     // Consecutive pages of one allocation (the usual case): written in
     // place through one view.
-    if let Some(mut window) = super::xmem::page_window(&list(), offset, len) {
+    if let Some(mut window) = super::xmem::page_window(&pages, offset, len) {
         return fill(window.bytes()).map(drop);
     }
     let mut data = vec![0; len];
     let n = fill(&mut data)?;
-    let mut pages = list();
     if super::xmem::write_physical(&pages, offset, &data[..n]) {
         return Ok(());
     }
@@ -1197,7 +1243,7 @@ fn into_destination(
     while pages.contains(&0) && rereads < LATE_LIST_TRIES {
         rereads += 1;
         std::thread::sleep(std::time::Duration::from_millis(1));
-        pages = list();
+        snapshot(&mut pages);
         if !pages.contains(&0) && super::xmem::write_physical(&pages, offset, &data[..n]) {
             let late = LATE_LISTS.fetch_add(1, Ordering::Relaxed) + 1;
             if late.is_power_of_two() {
@@ -1497,7 +1543,7 @@ mod tests {
     }
 
     #[test]
-    fn half_a_queue_submits_itself() {
+    fn a_half_full_queue_waits_for_the_submit() {
         let (_dir, file) = file_with(&pattern(64));
         let create: extern "system" fn(*mut c_void, *const QueueDesc, *const Guid, Out) -> HRESULT =
             call(factory(), 0x50);
@@ -1513,7 +1559,11 @@ mod tests {
         let array = status_array(1);
         let mut out = [0u8; 16];
         enqueue(queue, &request(0, out.as_mut_ptr().cast(), 16, file, 8, 16));
-        enqueue_status(queue, array, 0); // the second of four: no submit needed
+        enqueue_status(queue, array, 0); // half of four, but no Submit yet
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(result(array, 0), E_PENDING);
+        assert_eq!(out, [0; 16]);
+        void(queue, 0x30);
         assert_eq!(wait(array, 0), S_OK);
         assert_eq!(out, pattern(64)[8..24]);
     }
@@ -1713,6 +1763,29 @@ mod tests {
         assert_eq!(out, [0; 16]);
     }
 
+    /// Close blocks until every submitted request has completed or failed,
+    /// and writes their status entries.
+    #[test]
+    fn closing_a_queue_completes_what_was_submitted() {
+        let data = pattern(8 << 20);
+        let (_dir, file) = file_with(&data);
+        let (queue, array) = (new_queue(0), status_array(1));
+        let chunk = 256 << 10;
+        let mut out = vec![0u8; data.len()];
+        for k in 0..32 {
+            let dst = out[k * chunk..].as_mut_ptr().cast();
+            enqueue(
+                queue,
+                &request(0, dst, chunk, file, (k * chunk) as u64, chunk),
+            );
+        }
+        enqueue_status(queue, array, 0);
+        void(queue, 0x30);
+        void(queue, 0x40);
+        assert_eq!(result(array, 0), S_OK);
+        assert!(out == data);
+    }
+
     #[test]
     fn physical_page_destinations() {
         use crate::modules::xmem;
@@ -1906,8 +1979,12 @@ mod tests {
         let number = page[0];
         let filler = std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(2));
-            // SAFETY: the leaked list, alive for the whole test.
-            unsafe { std::ptr::write_volatile(at as *mut usize, number) };
+            // SAFETY: the leaked aligned list, alive for the whole test; paired
+            // with the worker's atomic loads in `into_destination`.
+            unsafe {
+                std::sync::atomic::AtomicUsize::from_ptr(at as *mut usize)
+                    .store(number, Ordering::Release);
+            }
         });
         enqueue(queue, &r);
         enqueue_status(queue, array, 0);
@@ -1964,6 +2041,128 @@ mod tests {
         assert!(!l.lanes[&0].statuses.is_empty());
         l.finish(&paged, Ok(()));
         assert!(l.lanes[&0].statuses.is_empty());
+    }
+
+    #[test]
+    fn a_queue_that_submits_itself_holds_reads_after_held_status() {
+        let mut l = lanes(STAGING);
+        l.lanes.insert(0, Lane::new(0, 64));
+        let array = status_array(4);
+        let entries = array.cast::<Instance<StatusArray>>();
+        let push_status = |l: &mut Lanes, index: u32| {
+            add_ref_instance(entries);
+            let status = Status {
+                array: entries,
+                index,
+            };
+            status.entry().store(E_PENDING, Ordering::Release);
+            l.lanes
+                .get_mut(&0)
+                .unwrap()
+                .unsubmitted
+                .push(Command::Status(status));
+        };
+
+        // [R1(PAGE_DESTINATION), S1] held on auto-submit, then later [R2(plain), S2]
+        // auto-submitted: R2 must not overtake S1 or misattribute its error to S1.
+        read(&mut l, 0, PAGE_DESTINATION, 16);
+        push_status(&mut l, 0);
+        l.submit_as(0, false);
+        assert!(l.start().is_none());
+        assert_eq!(result(array, 0), E_PENDING);
+
+        read(&mut l, 0, 0, 16);
+        push_status(&mut l, 1);
+        l.submit_as(0, false);
+        assert!(
+            l.start().is_none(),
+            "plain read must not overtake held status"
+        );
+        assert_eq!(result(array, 0), E_PENDING);
+        assert_eq!(result(array, 1), E_PENDING);
+
+        l.submit(0);
+        let r1 = l.start().unwrap();
+        assert_eq!(r1.request.options, PAGE_DESTINATION);
+        l.finish(&r1, Ok(()));
+        assert_eq!(result(array, 0), S_OK);
+        assert_eq!(result(array, 1), E_PENDING);
+
+        let r2 = l.start().unwrap();
+        assert_eq!(r2.request.options, 0);
+        assert!(l.start().is_none());
+        l.finish(&r2, Err(END_OF_FILE));
+        assert_eq!(result(array, 0), S_OK);
+        assert_eq!(result(array, 1), END_OF_FILE);
+
+        // [R3(PAGE_DESTINATION), S3, R4(plain), S4] in the same auto-submit batch:
+        // R4 must stay held behind S3 as well.
+        read(&mut l, 0, PAGE_DESTINATION, 16);
+        push_status(&mut l, 2);
+        read(&mut l, 0, 0, 16);
+        push_status(&mut l, 3);
+        l.submit_as(0, false);
+        assert!(
+            l.start().is_none(),
+            "plain read in same batch must not overtake held status"
+        );
+        assert_eq!(result(array, 2), E_PENDING);
+        assert_eq!(result(array, 3), E_PENDING);
+
+        l.submit(0);
+        let r3 = l.start().unwrap();
+        assert_eq!(r3.request.options, PAGE_DESTINATION);
+        l.finish(&r3, Ok(()));
+        assert_eq!(result(array, 2), S_OK);
+        assert_eq!(result(array, 3), E_PENDING);
+
+        let r4 = l.start().unwrap();
+        assert_eq!(r4.request.options, 0);
+        l.finish(&r4, Err(END_OF_FILE));
+        assert_eq!(result(array, 2), S_OK);
+        assert_eq!(result(array, 3), END_OF_FILE);
+
+        release(entries);
+    }
+
+    #[test]
+    fn a_queue_that_submits_itself_keeps_enqueue_order_for_first_failure() {
+        let mut l = lanes(STAGING);
+        l.lanes.insert(0, Lane::new(0, 64));
+        let array = status_array(1);
+        let entries = array.cast::<Instance<StatusArray>>();
+        add_ref_instance(entries);
+        let status = Status {
+            array: entries,
+            index: 0,
+        };
+        status.entry().store(E_PENDING, Ordering::Release);
+
+        // [R1(PAGE_DESTINATION, fails INVALID_DATA), R2(plain, fails END_OF_FILE), S0]:
+        // R2 starts early while R1 and S0 wait, yet S0 must still report R1's
+        // earlier failure in enqueue order rather than R2's earlier completion.
+        read(&mut l, 0, PAGE_DESTINATION, 16);
+        read(&mut l, 0, 0, 16);
+        l.lanes
+            .get_mut(&0)
+            .unwrap()
+            .unsubmitted
+            .push(Command::Status(status));
+        l.submit_as(0, false);
+
+        let r2 = l.start().unwrap();
+        assert_eq!(r2.request.options, 0);
+        assert!(l.start().is_none());
+        l.finish(&r2, Err(END_OF_FILE));
+        assert_eq!(result(array, 0), E_PENDING);
+
+        l.submit(0);
+        let r1 = l.start().unwrap();
+        assert_eq!(r1.request.options, PAGE_DESTINATION);
+        l.finish(&r1, Err(INVALID_DATA));
+        assert_eq!(result(array, 0), INVALID_DATA);
+
+        release(entries);
     }
 
     #[test]

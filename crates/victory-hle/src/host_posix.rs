@@ -429,6 +429,14 @@ pub extern "system" fn SetEvent(handle: *mut c_void) -> i32 {
     };
     e.set();
     sync::signalled();
+    watched(handle as usize, "set", 0);
+    if std::env::var_os("VICTORY_TRACE_SETS").is_some() {
+        tracing::warn!(
+            handle = ?handle,
+            "sync: SetEvent at image+ {:x?}",
+            native::dump::caller_chain()
+        );
+    }
     1
 }
 
@@ -480,6 +488,15 @@ pub extern "system" fn ReleaseSemaphore(
     match s.release(count as u32) {
         Some(before) => {
             sync::signalled();
+            if std::env::var_os("VICTORY_TRACE_RELEASES").is_some() {
+                tracing::warn!(
+                    handle = ?handle,
+                    count,
+                    before,
+                    "sync: ReleaseSemaphore at image+ {:x?}",
+                    native::dump::caller_chain()
+                );
+            }
             if !previous.is_null() {
                 // SAFETY: the title passes a valid pointer or null.
                 unsafe { previous.write(before as i32) };
@@ -545,12 +562,33 @@ impl Waitable {
 }
 
 pub extern "system" fn WaitForSingleObject(handle: *mut c_void, ms: u32) -> u32 {
+    static LONG_WAIT_MS: LazyLock<Option<u64>> = LazyLock::new(|| {
+        std::env::var("VICTORY_TRACE_LONG_WAITS_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|&ms| ms > 0)
+    });
     let timeout = (ms != INFINITE).then(|| Duration::from_millis(u64::from(ms)));
     let Some(object) = Waitable::of(handle) else {
         set_error(ERROR_INVALID_HANDLE);
         return WAIT_FAILED;
     };
+    let started = std::time::Instant::now();
     let got = object.wait(timeout);
+    let elapsed = started.elapsed();
+    if let Some(limit) = *LONG_WAIT_MS {
+        if elapsed >= Duration::from_millis(limit) {
+            lock(&WATCHED).insert(handle as usize);
+            tracing::warn!(
+                handle = ?handle,
+                ms,
+                elapsed_ms = elapsed.as_millis() as u64,
+                got,
+                "sync: long wait at image+ {:x?}",
+                native::dump::caller_chain()
+            );
+        }
+    }
     watched(handle as usize, if got { "wait got it" } else { "wait timed out" }, ms);
     if got {
         WAIT_OBJECT_0
