@@ -193,3 +193,33 @@ fn guest_backing_256m() {
     drop(metal);
     drop(pool);
 }
+
+/// Which host formats Metal accepts as views of one backing. This is the
+/// compatibility gate for canonical format-view sharing; creation only, no
+/// draw, so it is a cheap probe.
+#[test]
+#[ignore = "compatibility probe for format-view sharing"]
+fn format_view_compatibility() {
+    use victory_backend::resources::{Format, ResourceBackend, TextureDesc, ViewDesc};
+    let metal = victory_metal::metal::Metal::new().expect("Metal");
+    let pairs = [
+        (Format::Rgba8Unorm, Format::Rgba8UnormSrgb),
+        (Format::R32Float, Format::R32Uint),
+        (Format::Rgba8Unorm, Format::Bgra8Unorm),
+        (Format::R16Unorm, Format::R16Float),
+    ];
+    for (base, view) in pairs {
+        let t = metal
+            .create_texture(&TextureDesc::d2(base, 16, 16))
+            .expect("base texture");
+        let made = metal.create_texture_view(
+            &t,
+            &ViewDesc {
+                format: view,
+                mips: (0, 1),
+                slices: (0, 1),
+            },
+        );
+        println!("{base:?} -> {view:?}: {}", if made.is_ok() { "view" } else { "refused" });
+    }
+}
