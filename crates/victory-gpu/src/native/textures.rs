@@ -143,6 +143,9 @@ struct Watch {
     /// its baseline, not a change).
     entries: HashMap<usize, (usize, usize, bool)>,
     dirty: std::collections::HashSet<usize>,
+    /// Keys a heap, view or draw actually bound. An entry no draw has ever
+    /// used is not scanned: no shader can sample it.
+    used: std::collections::HashSet<usize>,
 }
 
 static WATCH: std::sync::Mutex<Option<Watch>> = std::sync::Mutex::new(None);
@@ -158,8 +161,13 @@ fn start_scanner() {
             let mut seen: HashMap<usize, blake3::Hash> = HashMap::new();
             let mut buf = vec![0u8; 1 << 20];
             loop {
-                let list: Vec<(usize, (usize, usize, bool))> =
-                    watch(|w| w.entries.iter().map(|(&k, &v)| (k, v)).collect());
+                let list: Vec<(usize, (usize, usize, bool))> = watch(|w| {
+                    w.entries
+                        .iter()
+                        .filter(|(k, _)| w.used.contains(k))
+                        .map(|(&k, &v)| (k, v))
+                        .collect()
+                });
                 seen.retain(|k, _| list.iter().any(|(l, _)| l == k));
                 for &(key, (at, size, target)) in &list {
                     let mut h = blake3::Hasher::new();
@@ -339,7 +347,16 @@ impl<B: PresentBackend> Title<B> {
     /// The host texture of title texture `key`.
     pub fn texture_of(&mut self, key: usize) -> Option<Rc<B::Texture>> {
         self.realize(key);
+        self.mark_used(key);
         self.textures.get(&key).map(|t| t.texture.clone())
+    }
+
+    /// Marks a texture as bound by a heap, view or draw: from now on the
+    /// scanner hashes it and it is uploaded when its memory changes.
+    pub fn mark_used(&mut self, key: usize) {
+        if self.textures.contains_key(&key) {
+            watch(|w| w.used.insert(key));
+        }
     }
 
     /// Host textures made, the bytes of title memory they duplicate, and how
@@ -409,6 +426,7 @@ impl<B: PresentBackend> Title<B> {
             watch(|w| {
                 w.entries.remove(&key);
                 w.dirty.remove(&key);
+                w.used.remove(&key);
             });
             total = total.saturating_sub(size);
             n += 1;
@@ -425,6 +443,7 @@ impl<B: PresentBackend> Title<B> {
         watch(|w| {
             w.entries.remove(&key);
             w.dirty.remove(&key);
+            w.used.remove(&key);
         });
     }
 

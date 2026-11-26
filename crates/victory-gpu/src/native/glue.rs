@@ -567,12 +567,14 @@ pub(crate) fn mirror(handle: u64) {
                     t.texture_created(key, info);
                     t.realize(key);
                 }
+                t.mark_used(key);
             }
             // A view of a texture object that no list has used yet.
             Some(
                 crate::descriptor::View::Shader(r, _) | crate::descriptor::View::Unordered(r, ..),
             ) => {
                 t.realize(r);
+                t.mark_used(r);
             }
             _ => {}
         }
