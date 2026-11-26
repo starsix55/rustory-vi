@@ -284,9 +284,41 @@ fn free_gap(lowest: usize, highest: usize, len: usize, align: usize) -> Option<u
     None
 }
 
+/// Resident bytes in `[addr, addr + len)`, from `mincore`: physical pages
+/// actually backed, not the virtual reservation. 0 where the query fails.
+pub fn resident(addr: usize, len: usize) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    let page = page_size();
+    let start = addr & !(page - 1);
+    let end = addr.saturating_add(len).saturating_add(page - 1) & !(page - 1);
+    let pages = (end - start) / page;
+    if pages == 0 {
+        return 0;
+    }
+    let mut vec = vec![0u8; pages];
+    unsafe extern "C" {
+        fn mincore(addr: *mut std::ffi::c_void, len: usize, vec: *mut std::ffi::c_char) -> i32;
+    }
+    // SAFETY: `start..end` is a readable mapped range owned by the caller;
+    // `vec` has one byte per page.
+    let rc = unsafe {
+        mincore(
+            start as *mut std::ffi::c_void,
+            end - start,
+            vec.as_mut_ptr().cast(),
+        )
+    };
+    if rc == 0 {
+        vec.iter().filter(|b| **b & 1 != 0).count() * page
+    } else {
+        0
+    }
+}
+
 /// The process's memory footprint in bytes (what the system charges it for).
-pub fn footprint() -> usize {
-    const TASK_VM_INFO: i32 = 22;
+pub fn footprint() -> usize {    const TASK_VM_INFO: i32 = 22;
     unsafe extern "C" {
         fn task_info(task: MachPort, flavor: i32, info: *mut u64, count: *mut u32) -> KernReturn;
     }

@@ -145,6 +145,22 @@ impl PoolTable {
         )
     }
 
+    /// Resident physical bytes of the guest pools, from `mincore`. The pools
+    /// are virtual reservations; this is what is actually backed.
+    #[cfg(target_os = "macos")]
+    pub fn resident_bytes(&self) -> usize {
+        let g = self.lock();
+        g.pools
+            .values()
+            .map(|p| victory_platform::mem::resident(p.base, p.len))
+            .sum()
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub fn resident_bytes(&self) -> usize {
+        0
+    }
+
     /// Pools released since the last call; the host drops their buffers.
     pub fn take_released(&self) -> Vec<usize> {
         std::mem::take(&mut self.lock().released)

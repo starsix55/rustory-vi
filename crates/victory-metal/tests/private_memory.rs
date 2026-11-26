@@ -131,3 +131,65 @@ fn shared_256m() {
 fn private_256m() {
     measure(MTLStorageMode::Private);
 }
+
+/// Does wrapping a lazily committed guest pool as a Metal buffer commit or
+/// touch its pages? Separates virtual reservation, physical residency and
+/// Metal allocation.
+#[test]
+#[ignore = "memory experiment; needs the Metal Shader Converter"]
+fn guest_backing_256m() {
+    use victory_backend::backend::ComputeBackend;
+    use victory_platform::mem::{PagePool, resident};
+
+    let pool = PagePool::new(256 << 20).expect("guest pool");
+    let base = pool.base().expect("pool mapping");
+    let before = (
+        resident(base as usize, pool.len()),
+        footprint() as u64,
+        swap_used() as u64,
+    );
+    let metal = victory_metal::metal::Metal::new().expect("Metal");
+    let buf = metal
+        .wrap_title_memory(base, pool.len())
+        .expect("wrap guest pool");
+    std::thread::sleep(std::time::Duration::from_millis(250));
+    let wrapped = (
+        resident(base as usize, pool.len()),
+        footprint() as u64,
+        swap_used() as u64,
+        metal.memory_usage(),
+    );
+    // Touch one 16 KiB page after wrapping: resident must grow by that page,
+    // not by the whole pool, unless Metal had already committed it.
+    // SAFETY: inside the pool mapping.
+    unsafe { base.write(1) };
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    let touched = resident(base as usize, pool.len());
+    println!("guest pool {} MiB", mb(pool.len() as u64));
+    println!(
+        "  resident {} -> {} -> {} MiB",
+        mb(before.0 as u64),
+        mb(wrapped.0 as u64),
+        mb(touched as u64)
+    );
+    println!(
+        "  footprint {} -> {} MiB (+{:.1})",
+        mb(before.1),
+        mb(wrapped.1),
+        mb(wrapped.1.saturating_sub(before.1))
+    );
+    println!(
+        "  swap {} -> {} MiB (+{:.1})",
+        mb(before.2),
+        mb(wrapped.2),
+        mb(wrapped.2.saturating_sub(before.2))
+    );
+    println!(
+        "  metal allocated {} MiB, title buffers {} MiB",
+        mb(wrapped.3.allocated),
+        mb(wrapped.3.title_buffers)
+    );
+    drop(buf);
+    drop(metal);
+    drop(pool);
+}

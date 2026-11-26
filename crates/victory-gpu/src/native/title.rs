@@ -501,6 +501,14 @@ impl<B: PresentBackend> Title<B> {
                     .collect();
                 format!("queue {q:#x}: {items} held, head for {since:.1?}, waits {waits:?}")
             }));
+        for (&id, queue) in &self.queues {
+            let (submitted, completed) = self.host.backend.queue_progress(&**queue);
+            if submitted > completed {
+                out.push(format!(
+                    "metal queue {id:#x}: {submitted} submitted, {completed} completed"
+                ));
+            }
+        }
         out
     }
 
@@ -552,6 +560,7 @@ impl<B: PresentBackend> Title<B> {
                     frame,
                     pools,
                     pool_bytes,
+                    guest_resident = self.host.guest_resident(),
                     mappings,
                     mapped_bytes,
                     descriptor_heaps = self.host.descriptor_heap_bytes(),

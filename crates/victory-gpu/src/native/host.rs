@@ -536,6 +536,11 @@ impl<B: GraphicsBackend> NativeHost<B> {
         self.memory.stats()
     }
 
+    /// Resident physical bytes of the guest pools (not their virtual size).
+    pub fn guest_resident(&self) -> usize {
+        self.memory.resident_bytes()
+    }
+
     /// Bytes of descriptor-heap buffers the host allocated. These are host
     /// memory, not guest, and are part of `currentAllocatedSize`.
     pub fn descriptor_heap_bytes(&self) -> u64 {
