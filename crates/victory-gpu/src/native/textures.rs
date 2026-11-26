@@ -127,9 +127,28 @@ pub fn upload<B: ResourceBackend>(
         layout.slices
     };
     let n = layout.desc.element_bytes as usize;
+    let host_format = info.desc().map(|d| d.format);
     for mip in 0..layout.mips.len() as u32 {
         let m = &layout.mips[mip as usize];
-        let row = m.width as usize * n;
+        let detiled_row = m.width as usize * n;
+        // Metal requires bytesPerRow to cover the full host row. Some console
+        // layouts have a tighter element pitch than the host format; pad the
+        // destination stride rather than letting `replaceRegion` assert.
+        let host_row = host_format.map_or(0, |f| f.row_bytes(m.width as usize));
+        let row = detiled_row.max(host_row);
+        if host_row > detiled_row {
+            static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            if N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 8 {
+                tracing::warn!(
+                    format = info.format,
+                    ?host_format,
+                    width = m.width,
+                    detiled_row,
+                    host_row,
+                    "host texture row pitch padded"
+                );
+            }
+        }
         let slice_pitch = row * m.height as usize;
         let depth = layout.subresource_depth(mip).max(1) as usize;
         let mut linear = vec![0u8; slice_pitch * depth];
