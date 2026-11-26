@@ -519,17 +519,32 @@ impl<B: PresentBackend> Title<B> {
         Rc::strong_count(&t.texture) <= holders * 2
     }
 
-    /// Host textures whose only strong references are this map and the
-    /// title-resource map (no live heap/view keeps them).
+    /// Host textures whose only strong references are this map, the
+    /// title-resource map and no live descriptor heap entry (no live view or
+    /// heap keeps them).
     pub fn unreferenced(&self) -> usize {
         let holders = self.holders();
+        let pinned = self.heap_pinned();
         self.textures
-            .values()
-            .filter(|t| {
+            .iter()
+            .filter(|(_, t)| {
                 let ptr = Rc::as_ptr(&t.texture) as usize;
-                Self::internally_held(t, holders.get(&ptr).copied().unwrap_or(1))
+                !pinned.contains(&ptr)
+                    && Self::internally_held(t, holders.get(&ptr).copied().unwrap_or(1))
             })
             .count()
+    }
+
+    /// Backing images a live descriptor heap entry names. The entry retains
+    /// the Metal texture, so the device memory stays allocated even if this
+    /// map drops the key.
+    fn heap_pinned(&self) -> std::collections::HashSet<usize> {
+        let refs = self.host.heap_texture_refs();
+        self.textures
+            .iter()
+            .filter(|(k, _)| refs.contains_key(k))
+            .map(|(_, t)| Rc::as_ptr(&t.texture) as usize)
+            .collect()
     }
 
     /// Unique host backing bytes by kind (depth, render target, unordered
@@ -537,6 +552,8 @@ impl<B: PresentBackend> Title<B> {
     /// images, for deciding what can actually be given up.
     pub fn breakdown(&self) -> (Vec<(&'static str, usize, usize)>, Vec<String>) {
         let holders = self.holders();
+        let refs = self.host.heap_texture_refs();
+        let pinned = self.heap_pinned();
         let mut seen = std::collections::HashSet::new();
         let mut kinds: Vec<(&'static str, usize, usize)> = vec![
             ("depth", 0, 0),
@@ -545,6 +562,7 @@ impl<B: PresentBackend> Title<B> {
             ("sampled", 0, 0),
             ("gpu-written", 0, 0),
             ("target-never-written", 0, 0),
+            ("heap-referenced", 0, 0),
         ];
         let mut top: Vec<(usize, String)> = Vec::new();
         for (&key, t) in &self.textures {
@@ -561,6 +579,9 @@ impl<B: PresentBackend> Title<B> {
                 3
             };
             kinds[i].1 += 1;
+            if refs.contains_key(&key) {
+                kinds[6].1 += 1;
+            }
             if t.gpu_written {
                 kinds[4].1 += 1;
             } else if t.info.render_target() {
@@ -568,6 +589,9 @@ impl<B: PresentBackend> Title<B> {
             }
             if seen.insert(ptr) {
                 kinds[i].2 += t.info.size;
+                if pinned.contains(&ptr) {
+                    kinds[6].2 += t.info.size;
+                }
                 if t.gpu_written {
                     kinds[4].2 += t.info.size;
                 } else if t.info.render_target() {
@@ -576,7 +600,7 @@ impl<B: PresentBackend> Title<B> {
                 top.push((
                     t.info.size,
                     format!(
-                        "{:#x}+{} {}x{}x{} fmt={} flags={:#x} mips={} ext={} uploads={} binds={} gpu={} key={key:#x}",
+                        "{:#x}+{} {}x{}x{} fmt={} flags={:#x} mips={} ext={} uploads={} binds={} gpu={} heap_refs={} key={key:#x}",
                         t.info.memory as usize,
                         t.info.size,
                         t.info.width,
@@ -589,6 +613,7 @@ impl<B: PresentBackend> Title<B> {
                         t.uploads,
                         t.target_binds,
                         t.gpu_written,
+                        refs.get(&key).copied().unwrap_or(0),
                     ),
                 ));
             }
@@ -608,6 +633,7 @@ impl<B: PresentBackend> Title<B> {
     /// memory stays authoritative; a later `realize` detiles them again.
     pub fn evict_textures(&mut self, limit: usize) -> (usize, usize) {
         let mut holders = self.holders();
+        let pinned = self.heap_pinned();
         let mut seen = std::collections::HashSet::new();
         let mut total: usize = 0;
         for t in self.textures.values() {
@@ -616,7 +642,11 @@ impl<B: PresentBackend> Title<B> {
             if t.gpu_written || t.info.flags & UNORDERED_ACCESS != 0 {
                 continue;
             }
-            if seen.insert(Rc::as_ptr(&t.texture) as usize) {
+            let ptr = Rc::as_ptr(&t.texture) as usize;
+            if pinned.contains(&ptr) {
+                continue;
+            }
+            if seen.insert(ptr) {
                 total += t.info.size;
             }
         }
@@ -631,7 +661,8 @@ impl<B: PresentBackend> Title<B> {
                     return false;
                 }
                 let ptr = Rc::as_ptr(&t.texture) as usize;
-                Self::internally_held(t, holders.get(&ptr).copied().unwrap_or(1))
+                !pinned.contains(&ptr)
+                    && Self::internally_held(t, holders.get(&ptr).copied().unwrap_or(1))
             })
             .map(|(&k, _)| k)
             .collect();

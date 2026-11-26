@@ -31,6 +31,10 @@ pub struct NativeHost<B: GraphicsBackend> {
     resources: RefCell<HashMap<usize, Res<B>>>,
     heaps: RefCell<Vec<Rc<NativeHeap<B>>>>,
     contract: RefCell<Contract<B>>,
+    /// Title textures currently named by a descriptor heap entry. A heap entry
+    /// retains the Metal texture itself, so these pin device memory even when
+    /// the host's `Rc` map no longer holds the key.
+    heap_refs: RefCell<HashMap<usize, usize>>,
     /// Draws and dispatches dropped because they read a root parameter the title never set.
     unset_roots: std::cell::Cell<u64>,
     /// Draws and clears dropped because none of their targets has a host texture.
@@ -42,6 +46,16 @@ pub struct NativeHost<B: GraphicsBackend> {
 /// How the error of a root parameter read with nothing set in it ends ([`NativeHost::execute`]
 /// drops that draw or dispatch alone).
 const NEVER_SET: &str = "was never set";
+
+/// Drops one heap entry's reference to title texture `key`.
+fn release_heap_ref(refs: &mut HashMap<usize, usize>, key: usize) {
+    if let Some(n) = refs.get_mut(&key) {
+        *n = n.saturating_sub(1);
+        if *n == 0 {
+            refs.remove(&key);
+        }
+    }
+}
 
 /// The host's side of the pool-offset contract ([`super::addr`]).
 struct Contract<B: GraphicsBackend> {
@@ -139,6 +153,7 @@ impl<B: GraphicsBackend> NativeHost<B> {
             resources: RefCell::default(),
             heaps: RefCell::default(),
             contract: RefCell::default(),
+            heap_refs: RefCell::default(),
             unset_roots: std::cell::Cell::new(0),
             no_targets: std::cell::Cell::new(0),
             passes: std::cell::Cell::new(0),
@@ -263,6 +278,7 @@ impl<B: GraphicsBackend> NativeHost<B> {
             pairs: Default::default(),
             table: Default::default(),
             mirrored: Default::default(),
+            keys: Default::default(),
         });
         self.heaps.borrow_mut().push(heap.clone());
         Ok(heap)
@@ -278,7 +294,36 @@ impl<B: GraphicsBackend> NativeHost<B> {
 
     /// The title released the heap whose descriptors start at `start`.
     pub fn drop_heap(&self, start: u64) {
-        self.heaps.borrow_mut().retain(|h| h.start != start);
+        let mut heaps = self.heaps.borrow_mut();
+        let Some(at) = heaps.iter().position(|h| h.start == start) else {
+            return;
+        };
+        let heap = heaps.remove(at);
+        let keys: Vec<usize> = heap.keys.borrow().values().copied().collect();
+        let mut refs = self.heap_refs.borrow_mut();
+        for key in keys {
+            release_heap_ref(&mut refs, key);
+        }
+    }
+
+    /// Title textures named by a live descriptor heap entry, and how many
+    /// entries name each. Snapshot for the residency report.
+    pub fn heap_texture_refs(&self) -> HashMap<usize, usize> {
+        self.heap_refs.borrow().clone()
+    }
+
+    /// Records that heap entry `index` now names title texture `key` (or no
+    /// texture). The old entry's reference is released first.
+    fn note_heap_key(&self, heap: &NativeHeap<B>, index: usize, key: Option<usize>) {
+        let old = heap.keys.borrow_mut().remove(&index);
+        let mut refs = self.heap_refs.borrow_mut();
+        if let Some(old) = old {
+            release_heap_ref(&mut refs, old);
+        }
+        if let Some(key) = key {
+            *refs.entry(key).or_default() += 1;
+            heap.keys.borrow_mut().insert(index, key);
+        }
     }
 
     /// The title released resource object `key`: later views naming it decode to nothing.
@@ -329,6 +374,7 @@ impl<B: GraphicsBackend> NativeHost<B> {
                 let (buf, ptr) = self.resolve(addr, u64::from(size))?;
                 self.backend
                     .write_buffer(&heap.heap, index, &buf, ptr, size);
+                self.note_heap_key(&heap, index, None);
             }
             Decoded::Image {
                 resource,
@@ -352,10 +398,12 @@ impl<B: GraphicsBackend> NativeHost<B> {
                     }
                     _ => self.backend.write_texture(&heap.heap, index, tex, 0.0),
                 }
+                self.note_heap_key(&heap, index, Some(resource));
             }
             Decoded::Sampler { desc, lod_bias } => {
                 let s = self.backend.create_sampler(&desc)?;
                 self.backend.write_sampler(&heap.heap, index, &s, lod_bias);
+                self.note_heap_key(&heap, index, None);
             }
         }
         heap.mirrored.borrow_mut().insert(index, record_at(handle));
@@ -584,6 +632,7 @@ impl<B: GraphicsBackend> NativeHost<B> {
             pairs: Default::default(),
             table: Default::default(),
             mirrored: Default::default(),
+            keys: Default::default(),
         });
         self.contract.borrow_mut().heap = Some(heap.clone());
         Ok(heap)

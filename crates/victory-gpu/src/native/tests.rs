@@ -318,6 +318,11 @@ fn clear_and_draw_into_render_target() {
     (sw[1], sw[2], sw[6], sw[7], sw[8]) = (1, 1, 3, 3, 3);
     crate::descriptor::create_sampler_x(std::ptr::null_mut(), &sw, sstart);
     assert!(h.mirror(vstart).unwrap() && h.mirror(sstart).unwrap());
+    assert_eq!(
+        h.heap_texture_refs().get(&0xA11CE),
+        Some(&1),
+        "the heap entry pins the texture"
+    );
 
     let mut l = NativeList::default();
     l.set_render_targets(std::slice::from_ref(&color), None);
@@ -338,6 +343,11 @@ fn clear_and_draw_into_render_target() {
     assert_eq!(px(0, 0), [0, 0, 255, 255], "cleared corner");
     assert_eq!(px(15, 15), [0, 0, 255, 255], "cleared corner");
     let _ = Rc::strong_count(&color);
+    h.drop_heap(vstart);
+    assert!(
+        h.heap_texture_refs().is_empty(),
+        "dropping the heap releases its texture references"
+    );
     drop((views, smp));
 }
 

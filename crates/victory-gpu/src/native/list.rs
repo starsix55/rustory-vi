@@ -23,6 +23,8 @@ pub struct NativeHeap<B: GraphicsBackend> {
     pub table: std::cell::RefCell<Option<(u64, Rc<super::addr::Pages<B>>)>>,
     /// The title record (tag, view index, generation) each entry was last mirrored from.
     pub mirrored: std::cell::RefCell<std::collections::HashMap<usize, [u8; 12]>>,
+    /// The title texture key each entry names, when it names one.
+    pub keys: std::cell::RefCell<std::collections::HashMap<usize, usize>>,
 }
 
 /// How a translated title shader's arguments are laid out (`victory_shader::emit::HostShader`):
