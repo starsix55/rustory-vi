@@ -7251,7 +7251,7 @@ impl<'a> Lower<'a> {
             Some(RootType::Table | RootType::ResourceHeap | RootType::SamplerHeap) => {}
             _ => return Err("a descriptor outside the heaps"),
         }
-        if a.dynamic.is_none() {
+        if a.dynamic.is_none() && !self.x.res.waterfall.loads.contains(&load) {
             self.record_table_entry(a.param, a.offset.wrapping_add(4 * u32::from(first)), sampler);
         } else {
             self.record_dynamic_table(a.param);
@@ -7296,7 +7296,7 @@ impl<'a> Lower<'a> {
             Some(RootType::Table | RootType::ResourceHeap | RootType::SamplerHeap) => {}
             _ => return Err("a descriptor outside the heaps"),
         }
-        if a.dynamic.is_none() {
+        if a.dynamic.is_none() && !self.x.res.waterfall.loads.contains(&load) {
             self.record_table_entry(a.param, a.offset.wrapping_add(4 * u32::from(first)), sampler);
         } else {
             self.record_dynamic_table(a.param);
