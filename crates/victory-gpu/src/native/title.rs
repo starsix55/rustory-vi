@@ -502,9 +502,17 @@ impl<B: PresentBackend> Title<B> {
                     pool_bytes,
                     mappings,
                     mapped_bytes,
+                    descriptor_heaps = self.host.descriptor_heap_bytes(),
                     footprint,
                     swap,
                     metal_allocated = usage.allocated,
+                    metal_title_buffers = usage.title_buffers,
+                    metal_host = usage.allocated.saturating_sub(usage.title_buffers),
+                    metal_textures = allocated as u64,
+                    metal_other = usage
+                        .allocated
+                        .saturating_sub(usage.title_buffers)
+                        .saturating_sub(allocated as u64),
                     metal_recommended = usage.recommended,
                     metal_headroom = usage.recommended.saturating_sub(usage.allocated),
                     "host memory"

@@ -85,6 +85,9 @@ impl<B: ComputeBackend + ?Sized> Default for Heaps<'_, B> {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct MemoryUsage {
     pub allocated: u64,
+    /// Of `allocated`, bytes in buffers that wrap guest memory (not host
+    /// duplication: the title's own pages).
+    pub title_buffers: u64,
     pub recommended: u64,
 }
 

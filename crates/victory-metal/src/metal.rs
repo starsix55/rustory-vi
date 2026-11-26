@@ -22,6 +22,9 @@ pub struct Metal {
     pool_set: std::cell::RefCell<Option<Retained<ProtocolObject<dyn MTLResidencySet>>>>,
     /// What the encoders did to make buffers resident, for the tests and the frame line.
     pub(crate) counts: std::cell::Cell<ResidencyCounts>,
+    /// Bytes of title memory wrapped as zero-copy buffers (the title's pages,
+    /// not a host copy). Metal counts them in `currentAllocatedSize`.
+    pub(crate) title_buffer_bytes: std::sync::Arc<AtomicU64>,
 }
 
 /// Counters of residency work.
@@ -72,12 +75,17 @@ pub struct Pipeline(pub(crate) Retained<ProtocolObject<dyn MTLComputePipelineSta
 pub struct Buffer {
     pub(crate) buf: Retained<ProtocolObject<dyn MTLBuffer>>,
     pub(crate) base: *const u8,
+    /// The wrapped length, counted in `Metal::title_buffer_bytes`.
+    pub(crate) bytes: u64,
+    pub(crate) title_bytes: std::sync::Arc<AtomicU64>,
     /// The residency set it is in (so that dropping it leaves the set).
     pub(crate) resident: std::cell::RefCell<Option<Retained<ProtocolObject<dyn MTLResidencySet>>>>,
 }
 
 impl Drop for Buffer {
     fn drop(&mut self) {
+        self.title_bytes
+            .fetch_sub(self.bytes, Ordering::Relaxed);
         if let Some(set) = self.resident.get_mut().take() {
             set.removeAllocation(ProtocolObject::from_ref(&*self.buf));
             set.commit();
@@ -103,6 +111,7 @@ impl Metal {
             residency_sets,
             pool_set: Default::default(),
             counts: Default::default(),
+            title_buffer_bytes: std::sync::Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -159,6 +168,7 @@ impl ComputeBackend for Metal {
     fn memory_usage(&self) -> MemoryUsage {
         MemoryUsage {
             allocated: self.dev.currentAllocatedSize() as u64,
+            title_buffers: self.title_buffer_bytes.load(Ordering::Relaxed),
             recommended: self.dev.recommendedMaxWorkingSetSize(),
         }
     }
@@ -188,9 +198,13 @@ impl ComputeBackend for Metal {
                 )
         }
         .ok_or("newBufferWithBytesNoCopy refused the range (alignment or size)")?;
+        self.title_buffer_bytes
+            .fetch_add(len as u64, Ordering::Relaxed);
         Ok(Buffer {
             buf,
             base: ptr,
+            bytes: len as u64,
+            title_bytes: self.title_buffer_bytes.clone(),
             resident: Default::default(),
         })
     }

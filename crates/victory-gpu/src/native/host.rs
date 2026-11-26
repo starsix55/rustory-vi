@@ -342,6 +342,16 @@ impl<B: GraphicsBackend> NativeHost<B> {
         self.memory.stats()
     }
 
+    /// Bytes of descriptor-heap buffers the host allocated. These are host
+    /// memory, not guest, and are part of `currentAllocatedSize`.
+    pub fn descriptor_heap_bytes(&self) -> u64 {
+        self.heaps
+            .borrow()
+            .iter()
+            .map(|h| h.count as u64 * Self::step(h.kind))
+            .sum()
+    }
+
     fn step(kind: HeapKind) -> u64 {
         u64::from(crate::descriptor::increment(u32::from(kind == HeapKind::Sampler)).unwrap_or(32))
     }
