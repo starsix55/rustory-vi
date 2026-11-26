@@ -512,9 +512,22 @@ impl<B: PresentBackend> Title<B> {
             }));
         for (&id, queue) in &self.queues {
             let (submitted, completed) = self.host.backend.queue_progress(&**queue);
-            if submitted > completed {
+            if submitted <= completed {
+                continue;
+            }
+            static LAG: std::sync::Mutex<
+                Option<HashMap<usize, (u64, std::time::Instant)>>,
+            > = std::sync::Mutex::new(None);
+            let mut lag = LAG.lock().unwrap_or_else(|e| e.into_inner());
+            let lag = lag.get_or_insert_default();
+            let since = lag.entry(id).or_insert((submitted, std::time::Instant::now()));
+            if submitted > since.0 {
+                since.0 = submitted;
+            }
+            if since.1.elapsed() >= limit {
                 out.push(format!(
-                    "metal queue {id:#x}: {submitted} submitted, {completed} completed"
+                    "metal queue {id:#x}: {submitted} submitted, {completed} completed for {:.1?}",
+                    since.1.elapsed()
                 ));
             }
         }
