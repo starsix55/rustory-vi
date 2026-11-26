@@ -833,3 +833,49 @@ fn realize_pending_only_realizes_the_fixed_table_range() {
     drop(heap);
     drop(mem);
 }
+
+/// Offline invariant: console mip dimensions and row bytes match the host
+/// format's block geometry, except for depth/stencil formats whose upload row
+/// is the 4-byte depth plane rather than the nominal host texel row.
+#[test]
+fn console_mip_rows_fit_host_format_rows() {
+    use victory_formats::texture::{Dimension as FDim, Swizzle as FSwizzle, Texture as FTexture, TextureDesc as FDesc};
+    let sizes = [(64, 64), (63, 37), (16, 16), (8, 8), (4, 4), (2, 2), (1, 1), (256, 128)];
+    for dxgi in 0..=120u32 {
+        let Some(host) = super::descriptors::format(dxgi) else { continue };
+        let depth = matches!(crate::resource::pc_format(dxgi), 19 | 20 | 45 | 118);
+        for &(width, height) in &sizes {
+            let desc = FDesc {
+                dimension: FDim::Tex2d,
+                width,
+                height,
+                depth_or_array: 1,
+                mips: 0,
+                format: dxgi,
+                samples: 1,
+                swizzle: FSwizzle::LINEAR,
+            };
+            let Ok(tex) = FTexture::new(&desc) else { continue };
+            let layout = &tex.planes[0].layout;
+            for (mip, m) in layout.mips.iter().enumerate() {
+                let host_width = (width >> mip).max(1);
+                let (block, _) = host.block();
+                let expected_w = host_width.div_ceil(block as u32);
+                assert_eq!(
+                    m.width, expected_w,
+                    "dxgi {dxgi} {:?} {width}x{height} mip {mip}: console width",
+                    host
+                );
+                let detiled = m.width as usize * layout.desc.element_bytes as usize;
+                if !depth {
+                    assert_eq!(
+                        detiled,
+                        host.row_bytes(host_width as usize),
+                        "dxgi {dxgi} {:?} {width}x{height} mip {mip}: row bytes",
+                        host
+                    );
+                }
+            }
+        }
+    }
+}
