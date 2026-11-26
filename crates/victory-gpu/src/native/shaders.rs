@@ -160,10 +160,15 @@ impl<B: PresentBackend> Title<B> {
         // Translator output carries no root signature: the argument buffer is laid out by the
         // binding the host fills it by.
         let binding = Binding::of(shader);
+        let started = std::time::Instant::now();
         let made = match binding.layout() {
             Some(l) => self.host.backend.create_compute_pipeline_with(&shader.dxil, &l),
             None => self.host.backend.create_compute_pipeline(&shader.dxil),
         };
+        let elapsed = started.elapsed();
+        if std::env::var_os("VICTORY_TRACE_PIPELINE_TIME").is_some() {
+            tracing::info!(name, ms = elapsed.as_millis() as u64, "compute pipeline made");
+        }
         match made {
             Ok(pso) => {
                 self.shaders.pipelines += 1;
@@ -267,7 +272,13 @@ impl<B: PresentBackend> Title<B> {
             stencil: depth.and(g.stencil()),
             raster: g.raster(),
         };
-        match self.host.render_pipeline(&desc) {
+        let started = std::time::Instant::now();
+        let made = self.host.render_pipeline(&desc);
+        let elapsed = started.elapsed();
+        if std::env::var_os("VICTORY_TRACE_PIPELINE_TIME").is_some() {
+            tracing::info!(name, ms = elapsed.as_millis() as u64, "render pipeline made");
+        }
+        match made {
             Ok(p) => {
                 self.shaders.pipelines += 1;
                 Pipe::Render(p, Some(Rc::new(Binding {

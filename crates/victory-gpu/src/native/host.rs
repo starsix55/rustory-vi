@@ -771,6 +771,11 @@ impl<B: GraphicsBackend> NativeHost<B> {
                 root, pso, heaps, groups, ..
             } => {
                 tracing::debug!(?groups, "dispatch");
+                if std::env::var_os("VICTORY_TRACE_DISPATCHES").is_some()
+                    && crate::frame::current() >= 1800
+                {
+                    tracing::info!(?groups, threads = ?pso.threads, "dispatch");
+                }
                 if std::env::var_os("VICTORY_TRACE_TARGETS").is_some() {
                     static G: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
                     if G.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 6 {
