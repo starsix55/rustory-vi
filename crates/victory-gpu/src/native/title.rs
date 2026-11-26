@@ -198,6 +198,15 @@ pub struct Title<B: PresentBackend> {
     pub(super) surface: Option<B::Surface>,
     /// Title textures no view has named yet.
     pub(super) pending: HashMap<usize, super::textures::TextureInfo>,
+    /// Host textures by canonical title-memory range and layout. Identical
+    /// aliases share one Metal texture; `Weak` lets the last user free it.
+    pub(super) backing: HashMap<
+        (usize, usize, u32, u32, u32, u32),
+        (
+            super::textures::TextureInfo,
+            std::rc::Weak<B::Texture>,
+        ),
+    >,
     queues: HashMap<usize, Rc<B::Queue>>,
     fences: HashMap<usize, Rc<B::Fence>>,
     held: Held<Rc<NativeList<B>>>,
@@ -218,6 +227,7 @@ impl<B: PresentBackend> Title<B> {
             shaders: Default::default(),
             libraries: Default::default(),
             textures: Default::default(),
+            backing: Default::default(),
             unloaded: std::collections::HashSet::new(),
             hot_keys: Vec::new(),
             hot_cursor: 0,

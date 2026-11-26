@@ -46,6 +46,20 @@ impl TextureInfo {
         self.flags & (RENDER_TARGET | DEPTH_STENCIL) != 0
     }
 
+    /// Identity of the title-memory range a host texture is made from. Two
+    /// title resources with this identity and the same layout are aliases of
+    /// one backing image and must share it.
+    pub fn backing_key(&self) -> (usize, usize, u32, u32, u32, u32) {
+        (
+            self.memory as usize,
+            self.size,
+            self.format,
+            self.width,
+            self.height,
+            self.flags,
+        )
+    }
+
     /// The backend's description of it; `None` for formats or shapes the host does not know.
     pub fn desc(&self) -> Option<TextureDesc> {
         let depth = self.flags & DEPTH_STENCIL != 0;
@@ -300,11 +314,25 @@ impl<B: PresentBackend> Title<B> {
             }
             return false;
         };
-        let tex = match self.host.texture(&desc) {
-            Ok(t) => t,
-            Err(e) => {
-                tracing::warn!(error = %e, ?desc, "no host texture");
-                return false;
+        let bkey = info.backing_key();
+        let shared = self.backing.get(&bkey).and_then(|(old, tex)| {
+            (old.layout == info.layout)
+                .then(|| tex.upgrade())
+                .flatten()
+        });
+        let tex = match shared {
+            Some(t) => t,
+            None => {
+                let t = match self.host.texture(&desc) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        tracing::warn!(error = %e, ?desc, "no host texture");
+                        return false;
+                    }
+                };
+                self.backing
+                    .insert(bkey, (info.clone(), Rc::downgrade(&t)));
+                t
             }
         };
         self.host.register_texture(key, &tex);
@@ -363,18 +391,20 @@ impl<B: PresentBackend> Title<B> {
     /// many of those are linear textures that could be views of title memory.
     pub fn resident(&self) -> (usize, usize, usize, usize) {
         let mut linear = (0, 0);
+        let mut seen = std::collections::HashSet::new();
+        let mut bytes = 0;
         for t in self.textures.values() {
+            let ptr = Rc::as_ptr(&t.texture) as usize;
+            if !seen.insert(ptr) {
+                continue;
+            }
+            bytes += t.info.size;
             if t.info.layout.desc.swizzle == victory_formats::texture::Swizzle::LINEAR {
                 linear.0 += 1;
                 linear.1 += t.info.size;
             }
         }
-        (
-            self.textures.len(),
-            self.textures.values().map(|t| t.info.size).sum(),
-            linear.0,
-            linear.1,
-        )
+        (self.textures.len(), bytes, linear.0, linear.1)
     }
 
     /// Host textures whose only strong references are this map and the
