@@ -672,3 +672,29 @@ fn a_null_descriptor_is_not_a_pending_texture() {
     drop(vheap);
     drop(views);
 }
+
+/// A copy naming a texture the host cannot realize is an error before
+/// encoding, not a submission with the placeholder.
+#[test]
+fn realize_pending_refuses_a_missing_texture() {
+    let Some(_h) = host() else { return };
+    let mut list = NativeList::default();
+    list.copy_texture(0xDEAD_BEEF, 0xDEAD_BEEF);
+    let lists = vec![Rc::new(list)];
+    let mut stats = crate::native::title::Stats::default();
+    with_title(|t| {
+        let Title {
+            host,
+            pending,
+            textures,
+            backing,
+            unloaded,
+            ..
+        } = t;
+        let result = crate::native::textures::realize_pending(
+            host, pending, textures, backing, unloaded, &mut stats, 0, 0, &lists,
+        );
+        assert!(result.is_err(), "no placeholder submission");
+    })
+    .unwrap();
+}
