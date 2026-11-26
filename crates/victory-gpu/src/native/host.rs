@@ -800,9 +800,7 @@ impl<B: GraphicsBackend> NativeHost<B> {
                 root, pso, heaps, groups, ..
             } => {
                 tracing::debug!(?groups, "dispatch");
-                if std::env::var_os("VICTORY_TRACE_DISPATCHES").is_some()
-                    && crate::frame::current() >= 1800
-                {
+                if std::env::var_os("VICTORY_TRACE_DISPATCHES").is_some() {
                     tracing::info!(?groups, threads = ?pso.threads, "dispatch");
                 }
                 if std::env::var_os("VICTORY_TRACE_TARGETS").is_some() {
