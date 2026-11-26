@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="200" viewBox="0 0 900 200" role="img" aria-labelledby="t d">
+  <title id="t">Progress: 3 of 7 checkpoints</title>
+  <desc id="d">Reached: Boots, Draws, Menus. Next: Loads. Still ahead: World, Plays, Steady.</desc>
+  <!-- To update: move the orange fill and the NEXT marker one node to the right, then change the number and the label above. -->
+  <style>
+    .f { font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", "Helvetica Neue", Arial, sans-serif; }
+    .k { font-size: 12px; font-weight: 700; letter-spacing: 2.4px; fill: #8b8794; }
+    .big { font-size: 68px; font-weight: 800; fill: #ff6a1f; }
+    .sub { font-size: 16px; fill: #d8d3dc; }
+    .lab { font-size: 14px; text-anchor: middle; }
+    .on { fill: #f6f2ee; font-weight: 600; }
+    .nx { fill: #ff9a5c; font-weight: 700; }
+    .off { fill: #7c7885; }
+    .tag { font-size: 11px; font-weight: 700; letter-spacing: 2.4px; text-anchor: middle; fill: #ff9a5c; }
+    .note { font-size: 12.5px; fill: #7c7885; }
+  </style>
+  <rect width="900" height="200" rx="18" fill="#0b0b0e"/>
+
+  <text class="f k" x="40" y="50">PROGRESS</text>
+  <text class="f big" x="37" y="116">43%</text>
+  <text class="f sub" x="40" y="142">3 of 7 checkpoints</text>
+
+  <!-- track -->
+  <line x1="300" y1="88" x2="850" y2="88" stroke="#2b2b33" stroke-width="5" stroke-linecap="round"/>
+  <line x1="300" y1="88" x2="483.33" y2="88" stroke="#ff6a1f" stroke-width="5" stroke-linecap="round"/>
+
+  <!-- reached -->
+  <g fill="#ff6a1f">
+    <circle cx="300" cy="88" r="15"/>
+    <circle cx="391.67" cy="88" r="15"/>
+    <circle cx="483.33" cy="88" r="15"/>
+  </g>
+  <g fill="none" stroke="#0b0b0e" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M293 88.5l4.4 4.6 9.2-10.2"/>
+    <path d="M384.67 88.5l4.4 4.6 9.2-10.2"/>
+    <path d="M476.33 88.5l4.4 4.6 9.2-10.2"/>
+  </g>
+
+  <!-- next -->
+  <circle cx="575" cy="88" r="15" fill="#0b0b0e" stroke="#ff6a1f" stroke-width="3" stroke-dasharray="5 4"/>
+  <circle cx="575" cy="88" r="4.5" fill="#ff6a1f"/>
+  <text class="f tag" x="575" y="56">NEXT</text>
+
+  <!-- later -->
+  <g fill="#0b0b0e" stroke="#3a3a43" stroke-width="3">
+    <circle cx="666.67" cy="88" r="15"/>
+    <circle cx="758.33" cy="88" r="15"/>
+    <circle cx="850" cy="88" r="15"/>
+  </g>
+
+  <!-- labels -->
+  <text class="f lab on" x="300" y="132">Boots</text>
+  <text class="f lab on" x="391.67" y="132">Draws</text>
+  <text class="f lab on" x="483.33" y="132">Menus</text>
+  <text class="f lab nx" x="575" y="132">Loads</text>
+  <text class="f lab off" x="666.67" y="132">World</text>
+  <text class="f lab off" x="758.33" y="132">Plays</text>
+  <text class="f lab off" x="850" y="132">Steady</text>
+
+  <text class="f note" x="40" y="182">Counted in checkpoints, not hours: the last ones are the hard ones. As reported upstream, 26 Nov 2026.</text>
+</svg>

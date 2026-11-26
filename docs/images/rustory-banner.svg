@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="380" viewBox="0 0 1280 380" role="img" aria-labelledby="t d">
+  <title id="t">Rustory VI</title>
+  <desc id="d">VIctory, rewritten for Apple Silicon. Native Rust, Metal, no Wine.</desc>
+  <defs>
+    <pattern id="dots" width="28" height="28" patternUnits="userSpaceOnUse">
+      <circle cx="3" cy="3" r="1.4" fill="#ffffff" fill-opacity="0.08"/>
+    </pattern>
+    <radialGradient id="glow" cx="0.9" cy="0.04" r="0.8">
+      <stop offset="0" stop-color="#ff6a1f" stop-opacity="0.36"/>
+      <stop offset="1" stop-color="#ff6a1f" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="rule" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#ff6a1f"/>
+      <stop offset="1" stop-color="#ffb347"/>
+    </linearGradient>
+    <clipPath id="card"><rect width="1280" height="380" rx="22"/></clipPath>
+  </defs>
+  <style>
+    .f { font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", "Helvetica Neue", Arial, sans-serif; }
+  </style>
+  <g clip-path="url(#card)">
+    <rect width="1280" height="380" fill="#0b0b0e"/>
+    <rect width="1280" height="380" fill="url(#dots)"/>
+    <rect width="1280" height="380" fill="url(#glow)"/>
+
+    <!-- Wordmark: RUSTORY in type, VI drawn as shapes so it never depends on a font. -->
+    <text class="f" x="84" y="200" font-size="150" font-weight="800" fill="#f6f2ee" textLength="760" lengthAdjust="spacingAndGlyphs">RUSTORY</text>
+    <g transform="translate(888 92) scale(0.415)" fill="#ff6a1f">
+      <path d="M0 0H80L145 161L210 0H290L185 260H105Z"/>
+      <rect x="320" y="0" width="80" height="260"/>
+    </g>
+
+    <rect x="88" y="238" width="170" height="6" rx="3" fill="url(#rule)"/>
+    <text class="f" x="86" y="292" font-size="32" fill="#d8d3dc">VIctory, rewritten for Apple Silicon.</text>
+    <text class="f" x="86" y="336" font-size="20" letter-spacing="2" fill="#8b8794">NATIVE RUST  ·  METAL  ·  NO WINE</text>
+  </g>
+</svg>

@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="490" viewBox="0 0 900 490" role="img" aria-labelledby="t d">
+  <title id="t">How Rustory VI runs the game</title>
+  <desc id="d">The game's own x86-64 code runs inside Rustory VI, which provides the loader, system calls, GPU host and shader translation. Rosetta 2 runs the code, Metal runs the graphics, on an Apple Silicon Mac.</desc>
+  <style>
+    .f { font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", "Helvetica Neue", Arial, sans-serif; }
+    .h { font-size: 21px; font-weight: 700; fill: #f6f2ee; }
+    .a { fill: #ff6a1f; }
+    .s { font-size: 14.5px; fill: #bdb8c4; }
+    .c { font-size: 15px; font-weight: 700; fill: #f6f2ee; }
+    .cs { font-size: 12.5px; fill: #a39eab; }
+    .cap { font-size: 13px; fill: #7c7885; text-anchor: middle; }
+  </style>
+  <rect width="900" height="490" rx="18" fill="#0b0b0e"/>
+
+  <!-- the game -->
+  <rect x="40" y="30" width="820" height="72" rx="14" fill="#17171c" stroke="#2b2b33"/>
+  <text class="f h" x="64" y="62">The game <tspan fill="#8b8794" font-weight="500">· your own copy</tspan></text>
+  <text class="f s" x="64" y="86">The Xbox Series build's x86-64 code runs unchanged</text>
+
+  <g stroke="#3a3a43" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" fill="none">
+    <path d="M450 108v14M444 117l6 6 6-6"/>
+    <path d="M240 290v14M234 299l6 6 6-6"/>
+    <path d="M660 290v14M654 299l6 6 6-6"/>
+    <path d="M240 382v14M234 391l6 6 6-6"/>
+    <path d="M660 382v14M654 391l6 6 6-6"/>
+  </g>
+
+  <!-- Rustory VI -->
+  <rect x="40" y="130" width="820" height="156" rx="14" fill="#15100c" stroke="#ff6a1f" stroke-width="2"/>
+  <text class="f h a" x="64" y="164">Rustory VI</text>
+  <text class="f s" x="64" y="187">Stands in for the console, inside one native Rust process</text>
+  <g fill="#1f1812" stroke="#3b2a1b">
+    <rect x="64" y="206" width="184" height="60" rx="10"/>
+    <rect x="260" y="206" width="184" height="60" rx="10"/>
+    <rect x="456" y="206" width="184" height="60" rx="10"/>
+    <rect x="652" y="206" width="184" height="60" rx="10"/>
+  </g>
+  <text class="f c" x="80" y="231">Loader</text>
+  <text class="f cs" x="80" y="251">maps the game's files</text>
+  <text class="f c" x="276" y="231">System calls</text>
+  <text class="f cs" x="276" y="251">about 1,000, in Rust</text>
+  <text class="f c" x="472" y="231">GPU host</text>
+  <text class="f cs" x="472" y="251">graphics → Metal</text>
+  <text class="f c" x="668" y="231">Shaders</text>
+  <text class="f cs" x="668" y="251">GFX10 → DXIL</text>
+
+  <!-- Apple layers -->
+  <rect x="40" y="306" width="400" height="76" rx="14" fill="#17171c" stroke="#2b2b33"/>
+  <text class="f h" x="64" y="341">Rosetta 2</text>
+  <text class="f s" x="64" y="364">Runs the game's x86-64 code</text>
+  <rect x="460" y="306" width="400" height="76" rx="14" fill="#17171c" stroke="#2b2b33"/>
+  <text class="f h" x="484" y="341">Metal</text>
+  <text class="f s" x="484" y="364">With Apple's Metal Shader Converter</text>
+
+  <!-- the Mac -->
+  <rect x="40" y="398" width="820" height="50" rx="14" fill="#f6f2ee"/>
+  <text class="f" x="450" y="429" text-anchor="middle" font-size="17" font-weight="700" fill="#0b0b0e">Apple Silicon Mac · M1 or newer</text>
+
+  <text class="f cap" x="450" y="474">No Wine, no CrossOver, no Game Porting Toolkit in between.</text>
+</svg>

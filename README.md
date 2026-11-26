@@ -1,84 +1,86 @@
-<h1 align="center">Native VIctory for macOS</h1>
-
 <p align="center">
-A <b>native</b> macOS port of <a href="https://github.com/Marvisak/VIctory">VIctory</a>, the Xbox Series emulator for GTA VI.<br>
-No Wine, no CrossOver, no Game Porting Toolkit: the game's code runs in our own process, and its GPU work goes straight to Metal.
+  <img src="docs/images/rustory-banner.svg" alt="Rustory VI: VIctory, rewritten for Apple Silicon" width="100%">
 </p>
 
 <p align="center">
-<img alt="Apple Silicon M1 or newer" src="https://img.shields.io/badge/Apple%20Silicon-M1%2B-555555">
-<img alt="macOS 15 or newer" src="https://img.shields.io/badge/macOS-15%2B-blue">
-<img alt="Status: boot movie and menus on screen" src="https://img.shields.io/badge/status-menus%20on%20screen-orange">
-<img alt="GPL-3.0 licence" src="https://img.shields.io/badge/licence-GPL--3.0-lightgrey">
+  <a href="https://discord.gg/E65kyCNgSS"><img alt="Join the Discord" src="https://img.shields.io/badge/Discord-Join%20the%20crew-5865F2?style=for-the-badge&logo=discord&logoColor=white"></a>
+  <a href="ROADMAP.md"><img alt="Roadmap: what's next" src="https://img.shields.io/badge/Roadmap-What%27s%20next-24242b?style=for-the-badge"></a>
+  <a href="CONTRIBUTING.md"><img alt="Contribute: pull requests welcome" src="https://img.shields.io/badge/Contribute-PRs%20welcome-24242b?style=for-the-badge"></a>
 </p>
+
+<p align="center">
+  <img alt="Apple Silicon, M1 or newer" src="https://img.shields.io/badge/Apple%20Silicon-M1%2B-3a3a43?style=flat-square&logo=apple&logoColor=white">
+  <img alt="macOS 15 or newer" src="https://img.shields.io/badge/macOS-15%2B-3a3a43?style=flat-square">
+  <img alt="Rust, edition 2024" src="https://img.shields.io/badge/Rust-2024-3a3a43?style=flat-square&logo=rust&logoColor=white">
+  <img alt="GPL-3.0 licence" src="https://img.shields.io/badge/licence-GPL--3.0-3a3a43?style=flat-square">
+  <img alt="Status: pre-alpha" src="https://img.shields.io/badge/status-pre--alpha-ff6a1f?style=flat-square">
+</p>
+
+**Rustory VI** is a native Apple Silicon runtime for the Xbox Series build of GTA VI. The game's code runs in our own process, its graphics go straight to Metal, and there is no Wine, CrossOver or Game Porting Toolkit in between. It boots, draws and shows its menus. It is **not playable yet**.
+
+It is a community build of [Native VIctory for macOS](https://github.com/LakshanSivakumar/Native-Victory-macOS) by LakshanSivakumar, which in turn builds on [VIctory](https://github.com/Marvisak/VIctory) by Marvisak. The foundation is theirs; see [Credits](#credits).
 
 > [!IMPORTANT]
-> **Not playable yet, but you can see it run.** The game boots natively on a Mac, plays its boot movie and shows its menus in the window: the start screen, FINISH SETUP and LEGAL NOTICES, rendered on Metal at about 30 fps. Text and blending are now correct on the screens we have checked, and you can hear its sound. You can move through the menus with the keyboard. We know where to look, and we need help. **No game files are included here, ever.** You need your own legally obtained copy of the game.
+> **No game files here, ever.** You need your own legally obtained copy of the game. Rustory VI is unofficial and not affiliated with Rockstar Games, Take-Two, Microsoft or Apple.
 
-📸 **[See the latest screenshots](https://github.com/LakshanSivakumar/Native-Victory-macOS/issues/5)** (the game's start screen and setup menus, rendered natively on Metal).
+## Where are we?
 
-## Why a native port?
+<p align="center">
+  <img src="docs/images/rustory-progress.svg" alt="Progress: 3 of 7 checkpoints reached (Boots, Draws, Menus). Next: Loads." width="100%">
+</p>
 
-The [Wine-based route](https://github.com/pragyaangaur/VIctory-macOS) stacks the game on Wine, a Windows Direct3D 12 layer and Apple's D3DMetal. This project removes those layers:
+Menus on screen, world not yet. The [roadmap](ROADMAP.md) shows what comes next and where you can jump in.
 
-| Layer | Wine route | Native route (this repo) |
-| --- | --- | --- |
-| Game code (x86-64) | Wine process under Rosetta | Our own process under Rosetta, or recompiled to arm64 |
-| Windows and Xbox system calls | Wine + VIctory | Reimplemented in Rust for macOS (`victory-hle`, about 1,000 functions) |
-| Console graphics (D3D12.X) | D3D12 → D3DMetal → Metal | Straight to Metal (`victory-gpu`) |
-| Console shaders (GFX10) | → DXIL → D3DMetal | → DXIL → Apple Metal Shader Converter |
+<details>
+<summary>What the seven checkpoints mean</summary>
 
-Fewer layers means fewer places for things to break, and much better speed: boot frames run at about 28 to 30 fps.
+| | Checkpoint | It counts when |
+|:-:|---|---|
+| ✅ | **Boots** | the game's own code starts and runs natively on a Mac |
+| ✅ | **Draws** | frames appear in a window, rendered on Metal |
+| ✅ | **Menus** | the start screen and menus react to the keyboard |
+| ⬜ | **Loads** | it gets through the loading screens into the first scene |
+| ⬜ | **World** | the 3D world renders correctly |
+| ⬜ | **Plays** | you control a character and the world responds |
+| ⬜ | **Steady** | a long session keeps a steady frame rate and doesn't crash |
 
-## Where we are
+Status as reported by upstream on 26 November 2026. We haven't measured it independently yet, and every checkpoint counts the same, so read the percentage as a rough feel, not a forecast.
 
-| Area | State |
-| --- | --- |
-| Loader: maps the game and its DLLs, TLS, exceptions, threads | ✅ Works |
-| System calls: memory, files, threads, time, C runtime, sockets, audio (XAudio2), DirectStorage | ✅ Works for everything the boot uses |
-| Sound | 🟡 Plays through CoreAudio (the game's Windows Spatial Audio stream, mixed to stereo); reverb is still silent |
-| Loading: DirectStorage reads about 9,500 requests at about 79 MB/s | ✅ Works |
-| GPU: every draw gets a Metal pipeline, built from the console's own pipeline descriptions | ✅ Works (some parts are inferred, see [docs/native-host.md](docs/native-host.md)) |
-| Shaders: GFX10 → DXIL → Metal | 🟡 Most translate; 7 known shapes still refused |
-| Boot movie and menus in the window | 🟡 The boot movie plays and the start screen, FINISH SETUP and LEGAL NOTICES show in the window with correct text and blending ([#6](https://github.com/LakshanSivakumar/Native-Victory-macOS/issues/6) fixed); other screens not checked yet |
-| Start screen ("press A") and input | ✅ Passed; the keyboard drives the gamepad in the window (real controllers not yet) |
-| Running past ~50 s | 🔴 A Metal GPU command times out and frames stop |
-| Apple Silicon recompilation (no Rosetta) | 🟡 The whole game (440,000 functions) recompiles to arm64 and presents its first frame; fixing translation bugs one by one |
-| Gameplay | 🔴 Not yet |
+</details>
 
-The live list of open problems, with everything we already know about each one, is in **[docs/ROADMAP.md](docs/ROADMAP.md)**.
+## How it works
+
+<p align="center">
+  <img src="docs/images/rustory-stack.svg" alt="The game's x86-64 code runs inside Rustory VI, which provides the loader, system calls, GPU host and shader translation. Rosetta 2 runs the code and Metal runs the graphics, on an Apple Silicon Mac." width="100%">
+</p>
+
+The game's x86-64 code runs under Rosetta 2. We reimplement the Windows and Xbox system calls it makes, turn the console's graphics commands into Metal, and translate its shaders on the way. Fewer layers than the Wine route means fewer places to break.
 
 ## Quick start
 
-You need:
-
-- an Apple Silicon Mac (M1 or newer) with macOS 15 or newer and about 20 GB free;
-- [rustup](https://rustup.rs) (not Homebrew's `rust` package);
-- Apple's free [Metal Shader Converter](https://developer.apple.com/metal/shader-converter/) (download and run the installer);
-- your own copy of the Xbox Series game files.
-
-**1. Get the code and build it.**
+You need an Apple Silicon Mac on macOS 15 or newer with about 20 GB free, [rustup](https://rustup.rs) (not Homebrew's `rust`), Apple's free [Metal Shader Converter](https://developer.apple.com/metal/shader-converter/), and **your own copy of the game files**.
 
 ```bash
-git clone https://github.com/LakshanSivakumar/Native-Victory-macOS.git
+git clone https://github.com/starsix55/rustory-vi.git
 ```
 
 ```bash
-cd Native-Victory-macOS && tools/macos/native-setup.sh
+cd rustory-vi && tools/macos/native-setup.sh
 ```
-
-The setup script checks Rosetta, the Xcode command line tools, rustup and the Metal Shader Converter. It tells you exactly what to install if anything is missing, then builds `victory`.
-
-**2. Run the game.**
 
 ```bash
 tools/macos/run-native.sh /path/to/your/game/folder
 ```
 
-Point it at the folder that holds `game_scarlett_master.exe`. A window opens; after a few seconds of black while it loads, you should see the boot movie and then the menus, and the full log is saved under `runs/`. The script also presses Enter for you every two seconds until 80 s to get past the start screen. Click the window and the keyboard drives the game's gamepad:
+The setup script checks Rosetta, the Xcode command line tools, rustup and the Shader Converter, tells you what's missing, then builds. Point the run script at the folder that holds `game_scarlett_master.exe`: a window opens, stays black for a few seconds, then shows the boot movie and the menus. The log lands in `runs/`.
+
+<details>
+<summary>Keyboard controls</summary>
+
+Click the window and the keyboard drives the game's gamepad. The run script also presses Enter for you every two seconds for the first 80 s, to get past the start screen.
 
 | Keys | Pad |
-| --- | --- |
+|---|---|
 | Enter, Space | A |
 | Escape, Backspace | B |
 | X, Y | X, Y |
@@ -90,36 +92,43 @@ Point it at the folder that holds `game_scarlett_master.exe`. A window opens; af
 
 Real controllers aren't supported yet. Add `--headless` to run without a window, or `--seconds 60` to stop after a minute.
 
-**3. Tell us what happened.** Open a [Tester report](https://github.com/LakshanSivakumar/Native-Victory-macOS/issues/new?template=tester-report.yml) and attach the log. Reports from different Macs (M1 to M5, 8 GB to 128 GB) are very useful.
+</details>
 
-## Help wanted
+Then [tell us how it went](https://github.com/starsix55/rustory-vi/issues/new?template=tester-report.yml). A tester report from your Mac, whatever chip and RAM it has, helps more than you'd think.
 
-Whatever your background, there is something to do:
+## Help us
 
-- **Testers:** run the game on your Mac and file a tester report. No coding needed.
-- **Graphics and Metal:** the still-guessed pipeline state (culling, depth, stencil, write mask), shader refusals, the GPU timeout at about 53 s.
-- **Debugging:** the Metal GPU timeout at about 50 s, and real controllers through the Game Controller framework.
-- **Compilers:** the arm64 recompiler (jump tables, SSE, exceptions).
-- **Rust and systems:** missing Windows and Xbox system calls, speed, tests.
+| 🧪 **Test it** | 🎨 **Graphics & Metal** | 🦀 **Rust & systems** | 🧩 **Compilers** |
+|---|---|---|---|
+| Run it on your Mac and file a [tester report](https://github.com/starsix55/rustory-vi/issues/new?template=tester-report.yml). No code needed. | Guessed pipeline state, refused shaders, a GPU timeout. | Missing system calls, speed, tests. | The arm64 recompiler isn't in this repo yet: ask in an issue. |
 
-Read **[CONTRIBUTING.md](CONTRIBUTING.md)** to get started, then pick something from [docs/ROADMAP.md](docs/ROADMAP.md) or the issues labelled `good first issue`.
+Pull requests are welcome from anyone, under any name. Start with a [good first issue](https://github.com/starsix55/rustory-vi/labels/good%20first%20issue), read [CONTRIBUTING](CONTRIBUTING.md), and ask on [Discord](https://discord.gg/E65kyCNgSS) before starting anything big. You can stay fully anonymous; CONTRIBUTING shows how.
 
-## Documentation
+## What this repo adds
 
-| Document | What it covers |
-| --- | --- |
-| [docs/ROADMAP.md](docs/ROADMAP.md) | Open problems, what is known, where to start |
-| [docs/native-host.md](docs/native-host.md) | The native host in depth: loader, system calls, findings, every diagnostic switch |
-| [docs/metal-backend.md](docs/metal-backend.md) | The Metal backend and the Metal Shader Converter |
-| [docs/architecture.md](docs/architecture.md) | VIctory's overall design |
-| [docs/asset-policy.md](docs/asset-policy.md) | What may and may not be committed |
+Experiments in how the game's memory maps onto Metal, on top of upstream commit [`07e6c59`](https://github.com/LakshanSivakumar/Native-Victory-macOS/commit/07e6c598f613d16c9f2cfa35fc0fed2de0cf09a2) (26 Nov 2026):
 
-## Legal
+- DirectStorage completion semantics, and keeping file references alive for queued reads
+- Sharing host textures that alias the same title memory, and evicting unused ones under a budget
+- Lazy descriptor-heap realization, so only the textures a draw can reach get created
+- Native Metal texture copies, plus row-pitch, mip and depth/stencil layout fixes
+- Memory accounting (title, Metal, compressor, paging) and persistent queue-lag tracing
+- A written-down [seam between the GPU host and Metal](docs/backend-seam.md)
 
-This project contains no game code, assets, keys or Microsoft or Apple SDK files, and never will. Emulation is built from documentation, observation and clean-room analysis. You must supply your own legally obtained copy of the game. Do not post game files or links to them in issues or pull requests.
-
-Not affiliated with or endorsed by Rockstar Games, Take-Two Interactive, Microsoft or Apple. All trademarks belong to their owners.
+Catching up with upstream's newer commits is the first item on the [roadmap](ROADMAP.md).
 
 ## Credits
 
-Native VIctory for macOS builds on [VIctory](https://github.com/Marvisak/VIctory) by Marvisak and its contributors, and on [VIctory for macOS](https://github.com/pragyaangaur/VIctory-macOS) by Pragyaan Gaur and its contributors. Their full history is kept in this repository. Licensed under the [GPL-3.0](LICENSE).
+Rustory VI exists because other people did the hard part first.
+
+- **[Native VIctory for macOS](https://github.com/LakshanSivakumar/Native-Victory-macOS)** by [LakshanSivakumar](https://github.com/LakshanSivakumar) and contributors: the native macOS port this repo is built on.
+- **[VIctory](https://github.com/Marvisak/VIctory)** by Marvisak and contributors: the Xbox Series emulator it all started from.
+- **[VIctory for macOS](https://github.com/pragyaangaur/VIctory-macOS)** by Pragyaan Gaur and contributors: the Wine-based Mac route that came first.
+
+Their full commit history is kept in this repository. We also studied design ideas from [Xenia](https://github.com/xenia-project/xenia), [shadPS4](https://github.com/shadps4-emu/shadPS4), [DXMT](https://github.com/3Shain/dxmt) and [XCL](https://github.com/xcl-dev/xcl); [docs/backend-seam.md](docs/backend-seam.md) says what we took and what we didn't. Licensed under the [GPL-3.0](LICENSE).
+
+## Legal
+
+This project contains no game code, assets, keys or Microsoft or Apple SDK files, and never will. You must supply your own legally obtained copy of the game. Do not post game files or links to them in issues or pull requests.
+
+Not affiliated with or endorsed by Rockstar Games, Take-Two Interactive, Microsoft or Apple. All trademarks belong to their owners.
