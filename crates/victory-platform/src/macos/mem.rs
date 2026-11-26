@@ -318,7 +318,8 @@ pub fn resident(addr: usize, len: usize) -> usize {
 }
 
 /// The process's memory footprint in bytes (what the system charges it for).
-pub fn footprint() -> usize {    const TASK_VM_INFO: i32 = 22;
+pub fn footprint() -> usize {
+    const TASK_VM_INFO: i32 = 22;
     unsafe extern "C" {
         fn task_info(task: MachPort, flavor: i32, info: *mut u64, count: *mut u32) -> KernReturn;
     }
@@ -332,6 +333,92 @@ pub fn footprint() -> usize {    const TASK_VM_INFO: i32 = 22;
     } else {
         0
     }
+}
+
+/// `task_vm_info` fields that separate the process's physical charge from its
+/// virtual reservations, guest pools and Metal ledgers.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct VmStats {
+    pub virtual_size: u64,
+    pub resident_size: u64,
+    pub resident_peak: u64,
+    pub device: u64,
+    pub internal: u64,
+    pub external: u64,
+    pub compressed: u64,
+    pub phys_footprint: u64,
+    /// `ledger_tag_graphics_footprint`: Metal/IOGPU's charged footprint.
+    pub graphics: u64,
+    pub graphics_compressed: u64,
+    pub swapins: i64,
+}
+
+/// Read the full `task_vm_info` snapshot. Fields the kernel does not return on
+/// this macOS version stay zero.
+pub fn vm_stats() -> VmStats {
+    const TASK_VM_INFO: i32 = 22;
+    unsafe extern "C" {
+        fn task_info(task: MachPort, flavor: i32, info: *mut u64, count: *mut u32) -> KernReturn;
+    }
+    let mut info = [0u64; 64];
+    let mut count = 128u32;
+    // SAFETY: a buffer of `count` 32-bit words.
+    let kr = unsafe { task_info(task(), TASK_VM_INFO, info.as_mut_ptr(), &mut count) };
+    if kr != KERN_SUCCESS {
+        return VmStats::default();
+    }
+    VmStats {
+        virtual_size: info[0],
+        resident_size: info[2],
+        resident_peak: info[3],
+        device: info[4],
+        internal: info[6],
+        external: info[8],
+        compressed: info[15],
+        phys_footprint: info[18],
+        graphics: if count >= 36 { info[34] } else { 0 },
+        graphics_compressed: if count >= 36 { info[35] } else { 0 },
+        swapins: if count >= 45 { info[44] as i64 } else { 0 },
+    }
+}
+
+/// System-wide compressed memory and paging, from `vm_stat`. Compressor
+/// pages are 16 KiB kernel pages; this is separate from `vm.swapusage`.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SystemVm {
+    pub compressor_pages: u64,
+    pub compressor_bytes: u64,
+    pub pageins: u64,
+    pub pageouts: u64,
+    pub swap_used: u64,
+}
+
+/// System compressor, swap and paging counters for the memory report.
+/// `vm_stat` is a small local command; it runs only when the report line is
+/// due (every 64 frames), not per submission.
+pub fn system_vm() -> SystemVm {
+    let mut out = SystemVm {
+        swap_used: swap_used() as u64,
+        ..SystemVm::default()
+    };
+    let text = std::process::Command::new("/usr/bin/vm_stat")
+        .env("LC_ALL", "C")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .unwrap_or_default();
+    let number = |line: &str| -> Option<u64> {
+        text.lines()
+            .find(|l| l.trim_start().starts_with(line))
+            .and_then(|l| l.rsplit(':').next())
+            .map(|v| v.trim().trim_end_matches('.').replace(',', ""))
+            .and_then(|v| v.parse().ok())
+    };
+    out.compressor_pages = number("Pages occupied by compressor").unwrap_or(0);
+    out.pageins = number("Pageins").unwrap_or(0);
+    out.pageouts = number("Pageouts").unwrap_or(0);
+    out.compressor_bytes = out.compressor_pages.saturating_mul(16 * 1024);
+    out
 }
 
 /// `struct xsw_usage` from `sysctl vm.swapusage`, in bytes.

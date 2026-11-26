@@ -599,6 +599,55 @@ impl<B: PresentBackend> Title<B> {
                         "guest pool residency"
                     );
                 }
+                #[cfg(target_os = "macos")]
+                {
+                    let vm = victory_platform::mem::vm_stats();
+                    tracing::info!(
+                        frame,
+                        virtual_size = vm.virtual_size,
+                        resident_size = vm.resident_size,
+                        resident_peak = vm.resident_peak,
+                        device = vm.device,
+                        internal = vm.internal,
+                        external = vm.external,
+                        compressed = vm.compressed,
+                        phys_footprint = vm.phys_footprint,
+                        graphics = vm.graphics,
+                        graphics_compressed = vm.graphics_compressed,
+                        swapins = vm.swapins,
+                        "process memory"
+                    );
+                    let sys = victory_platform::mem::system_vm();
+                    let now = std::time::Instant::now();
+                    let (pageins_per_s, pageouts_per_s) = {
+                        static LAST: std::sync::Mutex<
+                            Option<(std::time::Instant, u64, u64)>,
+                        > = std::sync::Mutex::new(None);
+                        let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+                        let rates = last
+                            .map(|(at, ins, outs)| {
+                                let secs = now.duration_since(at).as_secs_f64().max(0.001);
+                                (
+                                    (sys.pageins.saturating_sub(ins)) as f64 / secs,
+                                    (sys.pageouts.saturating_sub(outs)) as f64 / secs,
+                                )
+                            })
+                            .unwrap_or((0.0, 0.0));
+                        *last = Some((now, sys.pageins, sys.pageouts));
+                        rates
+                    };
+                    tracing::info!(
+                        frame,
+                        compressor_pages = sys.compressor_pages,
+                        compressor_bytes = sys.compressor_bytes,
+                        pageins = sys.pageins,
+                        pageouts = sys.pageouts,
+                        pageins_per_s = pageins_per_s,
+                        pageouts_per_s = pageouts_per_s,
+                        swap_used = sys.swap_used,
+                        "system memory"
+                    );
+                }
                 let (kinds, top) = self.breakdown();
                 for age in [60u64, 600] {
                     let (heaps, entries, keys) = self.host.stale_heaps(age);

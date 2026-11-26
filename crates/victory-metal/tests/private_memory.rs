@@ -267,3 +267,13 @@ fn depth_stencil_depth_plane_roundtrip() {
     println!("plane out  {:?}", &out[..64]);
     assert_eq!(out, data, "depth plane roundtrip");
 }
+
+#[test]
+#[ignore = "memory attribution snapshot"]
+fn memory_attribution_snapshot() {
+    let vm = victory_platform::mem::vm_stats();
+    let sys = victory_platform::mem::system_vm();
+    println!("process {vm:?}");
+    println!("system  {sys:?}");
+    println!("footprint {}", victory_platform::mem::footprint());
+}
