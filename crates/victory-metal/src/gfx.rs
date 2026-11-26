@@ -424,6 +424,23 @@ impl ResourceBackend for Metal {
     type Texture = Texture;
     type Sampler = Sampler;
 
+    fn capabilities(&self) -> BackendCapabilities {
+        BackendCapabilities {
+            placement_heaps: false,
+            sparse_textures: false,
+            memoryless_attachments: false,
+            texture_views: true,
+            linear_texture_views: true,
+        }
+    }
+
+    fn allocated_size(&self, t: &Texture) -> usize {
+        // `MTLTexture` inherits `allocatedSize` from `MTLResource`, but the
+        // generated bindings do not expose the supertrait on the protocol
+        // object, so ask the object directly.
+        unsafe { objc2::msg_send![&*t.tex, allocatedSize] }
+    }
+
     fn create_heap(&self, kind: HeapKind, count: usize) -> Result<Heap, String> {
         let buf = self
             .dev
@@ -786,7 +803,14 @@ impl GraphicsBackend for Metal {
     }
 
     fn submit_passes(&self, queue: &Queue, work: &PassSubmission<'_, Self>) -> Result<(), String> {
-        let cb = queue.0.commandBuffer().ok_or("no command buffer")?;
+        // Encoder execution status makes a failed command buffer name the
+        // encoder that faulted; without it the error is only the code.
+        let descriptor = MTLCommandBufferDescriptor::new();
+        descriptor.setErrorOptions(MTLCommandBufferErrorOption::EncoderExecutionStatus);
+        let cb = queue
+            .0
+            .commandBufferWithDescriptor(&descriptor)
+            .ok_or("no command buffer")?;
         for (f, v) in work.waits {
             cb.encodeWaitForEvent_value(ProtocolObject::from_ref(&*f.0), *v);
         }
@@ -819,15 +843,40 @@ impl GraphicsBackend for Metal {
         for (f, v) in work.signals {
             cb.encodeSignalEvent_value(ProtocolObject::from_ref(&*f.0), *v);
         }
-        // A command buffer the GPU fails is logged (the first few), not silently dropped.
-        let failed = block2::RcBlock::new(|done: NonNull<ProtocolObject<dyn MTLCommandBuffer>>| {
+        // A command buffer the GPU fails is logged (the first few), not silently dropped. The
+        // summary makes an out-of-memory failure attributable to the work in the buffer.
+        let passes = work.passes.len();
+        let (mut dispatches, mut draws, mut blits) = (0usize, 0usize, 0usize);
+        for pass in work.passes {
+            match pass {
+                Pass::Compute(d) => dispatches += d.len(),
+                Pass::Render(rp) => draws += rp.draws.len(),
+                Pass::Blit(ops) => blits += ops.len(),
+            }
+        }
+        let usage = self.memory_usage();
+        let started = std::time::Instant::now();
+        let failed = block2::RcBlock::new(move |done: NonNull<ProtocolObject<dyn MTLCommandBuffer>>| {
             static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
             // SAFETY: Metal passes the command buffer that completed.
             let done = unsafe { done.as_ref() };
-            if let Some(e) = done.error()
-                && N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 20
-            {
-                eprintln!("metal: command buffer failed: {e:?} ({})", e.localizedDescription());
+            if let Some(e) = done.error() {
+                let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if n < 40 {
+                    tracing::error!(
+                        code = e.code(),
+                        error = %e.localizedDescription(),
+                        status = ?done.status(),
+                        passes,
+                        dispatches,
+                        draws,
+                        blits,
+                        allocated = usage.allocated,
+                        recommended = usage.recommended,
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        "metal command buffer failed"
+                    );
+                }
             }
         });
         // SAFETY: the block is retained by Metal until it has run.

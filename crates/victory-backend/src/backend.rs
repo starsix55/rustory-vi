@@ -79,6 +79,15 @@ impl<B: ComputeBackend + ?Sized> Default for Heaps<'_, B> {
     }
 }
 
+/// Device memory in use and the ceiling the OS recommends, in bytes. Metal
+/// reports `currentAllocatedSize` / `recommendedMaxWorkingSetSize`; other
+/// backends may leave them zero.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MemoryUsage {
+    pub allocated: u64,
+    pub recommended: u64,
+}
+
 /// Work for one queue: wait for fence values, run dispatches in order, signal fence values.
 pub struct Submission<'a, B: ComputeBackend + ?Sized> {
     pub waits: &'a [(&'a B::Fence, u64)],
@@ -97,6 +106,11 @@ pub trait ComputeBackend {
     type Pipeline;
     /// A descriptor heap (`ID3D12DescriptorHeap`): resource (CBV/SRV/UAV) or sampler.
     type Heap;
+
+    /// Device allocation and recommended working set, for the memory report.
+    fn memory_usage(&self) -> MemoryUsage {
+        MemoryUsage::default()
+    }
 
     fn create_queue(&self) -> Result<Self::Queue, String>;
     fn create_fence(&self, initial: u64) -> Result<Self::Fence, String>;

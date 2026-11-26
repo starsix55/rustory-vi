@@ -6,6 +6,8 @@
 #   --console MODEL       console model reported to the game (default: series-s on <=16 GB Macs, else series-x)
 # Extra VICTORY_* variables in your environment are passed through
 # (see docs/native-host.md, "Bring-up diagnostics").
+# VICTORY_SWAP_LIMIT_MB=N stops the run (and says so in the log) when system
+# swap passes N MiB: a safety guard, not a successful test result.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 
@@ -66,8 +68,31 @@ pid=$!
 if (( seconds > 0 )); then
   ( sleep "$seconds"; kill "$pid" 2>/dev/null ) &
 fi
+guard=""
+if [[ -n "${VICTORY_SWAP_LIMIT_MB:-}" ]]; then
+  # Opt-in safety: stop this run (never report it as a success) before system
+  # swap makes the whole Mac unresponsive. Parses `used = 12345.67M`.
+  (
+    while kill -0 "$pid" 2>/dev/null; do
+      used=$(sysctl -n vm.swapusage | awk '{print $6}')
+      used=${used%M}
+      used=${used%.*}
+      if [[ "$used" =~ ^[0-9]+$ ]] && (( used > VICTORY_SWAP_LIMIT_MB )); then
+        echo "swap guard: system swap ${used} MiB > ${VICTORY_SWAP_LIMIT_MB} MiB; stopping the run" >> "$log"
+        kill "$pid" 2>/dev/null
+        break
+      fi
+      sleep 2
+    done
+  ) &
+  guard=$!
+fi
 wait "$pid"
 rc=$?
+if [[ -n "$guard" ]]; then
+  kill "$guard" 2>/dev/null
+  wait "$guard" 2>/dev/null
+fi
 
 echo
 echo "Exit code $rc. Last lines of the log:"

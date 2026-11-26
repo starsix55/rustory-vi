@@ -831,6 +831,7 @@ dependencies = [
  "victory-formats",
  "victory-metal",
  "victory-pipeline",
+ "victory-platform",
  "victory-shader",
  "windows",
  "windows-sys",
@@ -879,6 +880,7 @@ dependencies = [
  "objc2-foundation",
  "objc2-metal",
  "objc2-quartz-core",
+ "tracing",
  "victory-backend",
 ]
 

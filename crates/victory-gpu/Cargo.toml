@@ -30,6 +30,7 @@ workspace = true
 # The Metal implementation of the backend traits; the native host is generic over them.
 [target.'cfg(target_os = "macos")'.dependencies]
 victory-metal = { path = "../victory-metal" }
+victory-platform.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Security", "Win32_System_Diagnostics_Debug", "Win32_System_Kernel", "Win32_System_LibraryLoader", "Win32_System_Memory", "Win32_System_Performance", "Win32_System_ProcessStatus", "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_System_Threading"] }

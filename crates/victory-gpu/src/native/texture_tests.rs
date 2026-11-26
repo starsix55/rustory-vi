@@ -135,6 +135,29 @@ fn a_texture_uploaded_blank_is_probed_at_each_submission() {
     });
 }
 
+/// Two title resource objects over the same title-memory range and layout are aliases: they share
+/// one host texture, and the second costs no additional device allocation.
+#[test]
+fn identical_title_resources_share_one_host_texture() {
+    let Some(pool) = pool(9109, 8) else { return };
+    let a = crate::resource::test_texture_at(pool.va(0), (32, 32), 1, 28, Swizzle::LINEAR.0, 0);
+    let b = crate::resource::test_texture_at(pool.va(0), (32, 32), 1, 28, Swizzle::LINEAR.0, 0);
+    let (same, allocated, keys, unique) = with_title(|t| {
+        assert!(t.realize(a as usize));
+        let allocated = t.allocated();
+        assert!(t.realize(b as usize));
+        let pa = std::rc::Rc::as_ptr(&t.texture_of(a as usize).unwrap());
+        let pb = std::rc::Rc::as_ptr(&t.texture_of(b as usize).unwrap());
+        (pa == pb, allocated == t.allocated(), t.key_bytes(), t.resident().1)
+    })
+    .unwrap();
+    assert!(same, "aliases share the backing");
+    assert!(allocated, "the second alias allocates nothing");
+    let info = crate::resource::texture_info(a).unwrap();
+    assert!(keys >= 2 * info.size, "both keys count toward title bytes");
+    assert!(unique >= info.size, "one backing counts once");
+}
+
 /// A block-compressed texture: 16 bytes a 4x4 block, in the console's layout, detiled as blocks.
 #[test]
 fn a_block_compressed_title_texture_is_detiled_as_blocks() {

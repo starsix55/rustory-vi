@@ -440,6 +440,15 @@ pub(crate) fn texture_created(res: This) {
     }
 }
 
+/// The GPU writes title texture `key` (a copy destination): realize it now and remember that its
+/// contents are the GPU's, not title memory's, so it is never given up.
+pub(crate) fn texture_written(key: usize) {
+    with_title(|t| {
+        t.realize(key);
+        t.mark_gpu_written(key);
+    });
+}
+
 /// `OMSetRenderTargets`: the host textures of the views' resources.
 pub(crate) fn targets(this: This, color: &[u64], depth: u64) {
     with_list(this, |t, l| {
@@ -468,10 +477,11 @@ pub(crate) fn targets(this: This, color: &[u64], depth: u64) {
 /// `ClearRenderTargetView`. shortcut: the whole target, whatever rectangles the title passes.
 pub(crate) fn clear_rtv(this: This, handle: u64, color: [f32; 4]) {
     with_list(this, |t, l| {
-        if let Some(tex) = crate::descriptor::rtv_record(handle).and_then(|r| t.texture_of(r.resource as usize)) {
-            if let Some(r) = crate::descriptor::rtv_record(handle) {
-                trace_bump(r.resource as usize, 1);
-            }
+        let Some(r) = crate::descriptor::rtv_record(handle) else { return };
+        let key = r.resource as usize;
+        if let Some(tex) = t.texture_of(key) {
+            trace_bump(key, 1);
+            t.mark_target(key);
             l.list.clear_render_target(&tex, color);
         }
     });
@@ -493,9 +503,13 @@ pub(crate) fn clear_dsv(this: This, handle: u64, flags: u32, depth: f32) {
     }
     with_list(this, |t, l| {
         if flags & 1 != 0
-            && let Some(tex) = crate::descriptor::dsv_record(handle).and_then(|r| t.texture_of(r.resource as usize))
+            && let Some(r) = crate::descriptor::dsv_record(handle)
         {
-            l.list.clear_depth(&tex, depth);
+            let key = r.resource as usize;
+            if let Some(tex) = t.texture_of(key) {
+                t.mark_target(key);
+                l.list.clear_depth(&tex, depth);
+            }
         }
     });
 }
@@ -956,7 +970,10 @@ pub(crate) fn draw(this: This, vertices: u32, instances: u32, first: u32, first_
             match call {
                 Ok(()) => {
                     ENCODED.fetch_add(1, Ordering::Relaxed);
-                    l.target_keys.iter().for_each(|&k| trace_bump(k, 0));
+                    for &k in &l.target_keys {
+                        t.mark_target(k);
+                        trace_bump(k, 0);
+                    }
                 }
                 Err(e) => tracing::warn!(error = %e, "draw"),
             }
@@ -976,7 +993,10 @@ pub(crate) fn draw_indexed(this: This, indices: u32, instances: u32, first: u32,
             match l.list.draw_indexed_instanced(indices, instances, first, base, first_instance) {
                 Ok(()) => {
                     ENCODED.fetch_add(1, Ordering::Relaxed);
-                    l.target_keys.iter().for_each(|&k| trace_bump(k, 0));
+                    for &k in &l.target_keys {
+                        t.mark_target(k);
+                        trace_bump(k, 0);
+                    }
                 }
                 Err(e) => tracing::warn!(error = %e, "indexed draw"),
             }

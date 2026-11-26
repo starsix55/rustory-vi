@@ -176,6 +176,22 @@ pub enum Compare {
     Always,
 }
 
+/// What a backend implements beyond the required calls, so the host can pick
+/// an allocation strategy without assuming Metal or D3D12.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BackendCapabilities {
+    /// Texture allocation from an explicit placement heap.
+    pub placement_heaps: bool,
+    /// Sparse textures whose pages can be mapped and unmapped.
+    pub sparse_textures: bool,
+    /// Attachments whose contents need not survive the pass.
+    pub memoryless_attachments: bool,
+    /// Views over mip and slice ranges of an existing texture.
+    pub texture_views: bool,
+    /// Textures whose texels are title memory itself (zero copy).
+    pub linear_texture_views: bool,
+}
+
 /// Descriptor heaps, textures and samplers. Heap entries are the converter's 24-byte
 /// `IRDescriptorTableEntry`; a root descriptor table is the address of its first entry
 /// (`heap_address`), pushed into `RootArgs` like a root view. Resources a heap entry names are kept
@@ -184,6 +200,18 @@ pub enum Compare {
 pub trait ResourceBackend: ComputeBackend {
     type Texture;
     type Sampler;
+
+    /// What this backend implements beyond the required calls.
+    fn capabilities(&self) -> BackendCapabilities {
+        BackendCapabilities::default()
+    }
+
+    /// Bytes this texture actually allocates on the device (Metal:
+    /// `allocatedSize`). `0` when the backend cannot say; the host then
+    /// reports title bytes only.
+    fn allocated_size(&self, _tex: &Self::Texture) -> usize {
+        0
+    }
 
     fn create_heap(&self, kind: HeapKind, count: usize) -> Result<Self::Heap, String>;
     /// The GPU address of entry `index`: what a root descriptor table holds.

@@ -31,7 +31,17 @@ pub struct NativeHost<B: GraphicsBackend> {
     resources: RefCell<HashMap<usize, Res<B>>>,
     heaps: RefCell<Vec<Rc<NativeHeap<B>>>>,
     contract: RefCell<Contract<B>>,
+    /// Draws and dispatches dropped because they read a root parameter the title never set.
+    unset_roots: std::cell::Cell<u64>,
+    /// Draws and clears dropped because none of their targets has a host texture.
+    no_targets: std::cell::Cell<u64>,
+    /// Passes handed to the backend.
+    passes: std::cell::Cell<u64>,
 }
+
+/// How the error of a root parameter read with nothing set in it ends ([`NativeHost::execute`]
+/// drops that draw or dispatch alone).
+const NEVER_SET: &str = "was never set";
 
 /// The host's side of the pool-offset contract ([`super::addr`]).
 struct Contract<B: GraphicsBackend> {
@@ -129,7 +139,25 @@ impl<B: GraphicsBackend> NativeHost<B> {
             resources: RefCell::default(),
             heaps: RefCell::default(),
             contract: RefCell::default(),
+            unset_roots: std::cell::Cell::new(0),
+            no_targets: std::cell::Cell::new(0),
+            passes: std::cell::Cell::new(0),
         }
+    }
+
+    /// Draws and clears dropped so far because none of their targets has a host texture.
+    pub fn no_targets(&self) -> u64 {
+        self.no_targets.get()
+    }
+
+    /// Draws and dispatches dropped so far because they read a root parameter never set.
+    pub fn unset_roots(&self) -> u64 {
+        self.unset_roots.get()
+    }
+
+    /// Passes handed to the backend so far (compute, render and blit; a clear is a render pass).
+    pub fn passes(&self) -> u64 {
+        self.passes.get()
     }
 
     /// The table the pool observer keeps current; register it as (or call it from) the observer.
@@ -263,6 +291,12 @@ impl<B: GraphicsBackend> NativeHost<B> {
         self.resources.borrow().contains_key(&key)
     }
 
+    /// Committed guest pools and mappings: `(pools, pool bytes, mappings,
+    /// mapped bytes)`. Pools count once however many titles address map them.
+    pub fn pool_stats(&self) -> (usize, usize, usize, usize) {
+        self.memory.stats()
+    }
+
     fn step(kind: HeapKind) -> u64 {
         u64::from(crate::descriptor::increment(u32::from(kind == HeapKind::Sampler)).unwrap_or(32))
     }
@@ -370,7 +404,7 @@ impl<B: GraphicsBackend> NativeHost<B> {
         let set = |slot: u8| {
             root.get(usize::from(slot))
                 .and_then(|r| r.as_ref())
-                .ok_or_else(|| format!("root parameter {slot} was never set"))
+                .ok_or_else(|| format!("root parameter {slot} {NEVER_SET}"))
         };
         let mut args = std::mem::take(&mut p.root);
         if b.dwords > 0 {
@@ -560,7 +594,7 @@ impl<B: GraphicsBackend> NativeHost<B> {
             let args = std::mem::take(&mut p.root);
             p.root = match r
                 .as_ref()
-                .ok_or_else(|| format!("root parameter {i} was never set"))?
+                .ok_or_else(|| format!("root parameter {i} {NEVER_SET}"))?
             {
                 Root::Constants(w) => args.constants(w),
                 Root::View(a) => {
@@ -914,25 +948,66 @@ impl<B: GraphicsBackend> NativeHost<B> {
         waits: &[(&B::Fence, u64)],
         signals: &[(&B::Fence, u64)],
     ) -> Result<(), String> {
-        let cmds: Vec<&Cmd<B>> = lists.iter().flat_map(|l| l.cmds.iter()).collect();
-        let preps = cmds
-            .iter()
-            .map(|c| self.prep(c))
-            .collect::<Result<Vec<_>, _>>()?;
+        let same = |a: &Cmd<B>, b: &Cmd<B>| match (a, b) {
+            (Cmd::Dispatch { .. }, Cmd::Dispatch { .. }) => true,
+            (Cmd::Copy { .. } | Cmd::Fill { .. }, Cmd::Copy { .. } | Cmd::Fill { .. }) => true,
+            (Cmd::CopyTexture { .. }, Cmd::CopyTexture { .. }) => true,
+            (Cmd::CopyTextureRegion { .. }, Cmd::CopyTextureRegion { .. }) => true,
+            (Cmd::Draw { targets: x, .. }, Cmd::Draw { targets: y, .. }) => x.same(y),
+            _ => false,
+        };
+        // A draw or dispatch that reads a root parameter the title never set is dropped by itself:
+        // refusing the whole piece for it also dropped the piece's value writes, and a queue that
+        // waits for one of those then holds everything behind it for good. Any other error still
+        // refuses the piece. A dropped command still ends the pass it would have ended, so the
+        // commands either side that it kept apart stay in two passes (`cut`).
+        let mut cmds: Vec<&Cmd<B>> = Vec::new();
+        let mut preps = Vec::new();
+        let mut cut: Vec<bool> = Vec::new();
+        let mut dropped: Vec<&Cmd<B>> = Vec::new();
+        for c in lists.iter().flat_map(|l| l.cmds.iter()) {
+            let no_target = match c {
+                Cmd::Draw { targets, .. } => {
+                    targets.color.is_empty() && targets.depth.is_none()
+                }
+                Cmd::Clear { color, depth } => color.is_none() && depth.is_none(),
+                _ => false,
+            };
+            if no_target {
+                self.no_targets.set(self.no_targets.get() + 1);
+                static ONCE: std::sync::Once = std::sync::Once::new();
+                ONCE.call_once(|| {
+                    tracing::warn!("native host drops work: a draw or clear with no render target the host represents (first time)");
+                });
+                dropped.push(c);
+                continue;
+            }
+            match self.prep(c) {
+                Ok(p) => {
+                    cut.push(dropped.drain(..).any(|d| !same(d, c)));
+                    cmds.push(c);
+                    preps.push(p);
+                }
+                Err(e)
+                    if e.ends_with(NEVER_SET)
+                        && matches!(c, Cmd::Draw { .. } | Cmd::Dispatch { .. }) =>
+                {
+                    self.unset_roots.set(self.unset_roots.get() + 1);
+                    static ONCE: std::sync::Once = std::sync::Once::new();
+                    ONCE.call_once(|| {
+                        tracing::warn!(error = %e, "native host drops work: a draw or dispatch that reads a root parameter the title never set (first time)");
+                    });
+                    dropped.push(c);
+                }
+                Err(e) => return Err(e),
+            }
+        }
 
         let mut groups = vec![];
         let mut i = 0;
         while i < cmds.len() {
             let mut j = i + 1;
-            let same = |a: &Cmd<B>, b: &Cmd<B>| match (a, b) {
-                (Cmd::Dispatch { .. }, Cmd::Dispatch { .. }) => true,
-                (Cmd::Copy { .. } | Cmd::Fill { .. }, Cmd::Copy { .. } | Cmd::Fill { .. }) => true,
-                (Cmd::CopyTexture { .. }, Cmd::CopyTexture { .. }) => true,
-                (Cmd::CopyTextureRegion { .. }, Cmd::CopyTextureRegion { .. }) => true,
-                (Cmd::Draw { targets: x, .. }, Cmd::Draw { targets: y, .. }) => x.same(y),
-                _ => false,
-            };
-            while j < cmds.len() && same(cmds[i], cmds[j]) {
+            while j < cmds.len() && !cut[j] && same(cmds[i], cmds[j]) {
                 j += 1;
             }
             groups.push(match cmds[i] {
@@ -1132,6 +1207,7 @@ impl<B: GraphicsBackend> NativeHost<B> {
                 }
             });
         }
+        self.passes.set(self.passes.get() + passes.len() as u64);
         self.backend.submit_passes(
             queue,
             &PassSubmission {

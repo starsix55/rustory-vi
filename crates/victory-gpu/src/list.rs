@@ -738,6 +738,7 @@ extern "system" fn copy_resource(this: This, dst: This, src: This) {
     }
     #[cfg(target_os = "macos")]
     if crate::resource::texture_info(dst).is_some() && crate::resource::texture_info(src).is_some() {
+        crate::native::glue::texture_written(dst as usize);
         let mut list = native(this).lock().unwrap_or_else(|e| e.into_inner());
         list.list.copy_texture(dst as usize, src as usize);
     } else if let (Some((to, a)), Some((from, b))) = (
@@ -793,6 +794,7 @@ extern "system" fn copy_texture_region(
                 box_[5].saturating_sub(box_[2]),
             ];
             if size.iter().all(|&n| n > 0 && n != u32::MAX) {
+                crate::native::glue::texture_written(d.resource as usize);
                 let mut list = native(this).lock().unwrap_or_else(|e| e.into_inner());
                 list.list.copy_texture_region(
                     d.resource as usize,

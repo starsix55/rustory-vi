@@ -1,7 +1,7 @@
 //! `ComputeBackend` on Metal: `MTLCommandQueue`s, `MTLSharedEvent` fences, DXIL through the Metal
 //! Shader Converter, dispatch with a top-level argument buffer at slot 2 over zero-copy memory.
 
-use crate::backend::{ComputeBackend, RootLayout, Submission};
+use crate::backend::{ComputeBackend, MemoryUsage, RootLayout, Submission};
 use crate::msc::Msc;
 use crate::resources::GraphicsBackend;
 use objc2::rc::Retained;
@@ -155,6 +155,13 @@ impl ComputeBackend for Metal {
     type Buffer = Buffer;
     type Pipeline = Pipeline;
     type Heap = crate::gfx::Heap;
+
+    fn memory_usage(&self) -> MemoryUsage {
+        MemoryUsage {
+            allocated: self.dev.currentAllocatedSize() as u64,
+            recommended: self.dev.recommendedMaxWorkingSetSize(),
+        }
+    }
 
     fn create_queue(&self) -> Result<Queue, String> {
         let q = self.dev.newCommandQueue().ok_or("newCommandQueue failed")?;

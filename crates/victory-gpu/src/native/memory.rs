@@ -132,6 +132,19 @@ impl PoolTable {
         (g.generation, maps)
     }
 
+    /// Committed guest memory and mappings: `(pools, pool bytes, mappings,
+    /// mapped bytes)`. Pool bytes count each pool once, however many title
+    /// addresses map it.
+    pub fn stats(&self) -> (usize, usize, usize, usize) {
+        let g = self.lock();
+        (
+            g.pools.len(),
+            g.pools.values().map(|p| p.len).sum(),
+            g.maps.len(),
+            g.maps.values().map(|m| m.len).sum(),
+        )
+    }
+
     /// Pools released since the last call; the host drops their buffers.
     pub fn take_released(&self) -> Vec<usize> {
         std::mem::take(&mut self.lock().released)

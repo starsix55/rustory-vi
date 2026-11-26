@@ -215,10 +215,25 @@ pub struct Tracked<B: ResourceBackend> {
     /// scanner (0: cold), and the hash of what the last probe read.
     hot: u32,
     probe: Option<blake3::Hash>,
+    /// Whether the GPU has written it (drawn or cleared as a target, a copy destination, or a
+    /// UAV). Its contents then do not exist in title memory and it must not be given up.
+    gpu_written: bool,
+    /// Draws and clears that bound it as a target.
+    target_binds: u64,
+    /// Fingerprint of `info.layout`: equal layouts can share a backing image
+    /// even when the title described the resource with another format.
+    layout_id: u64,
 }
 
 /// Submissions a texture whose memory changed (or that was uploaded blank) stays hot without a
 /// further change.
+/// Stable fingerprint of a console layout: equal layouts can share one backing
+/// image even when the title described the resource with another format.
+fn layout_id(layout: &Layout) -> u64 {
+    let hash = blake3::hash(format!("{layout:?}").as_bytes());
+    u64::from_le_bytes(hash.as_bytes()[..8].try_into().expect("a blake3 hash has 32 bytes"))
+}
+
 const HOT: u32 = 600;
 /// Maximum hot textures probed synchronously on a single submission. Boot movies and UI glyph
 /// caches have ~12 hot textures (all checked every submission); when world streaming realizes
@@ -353,6 +368,7 @@ impl<B: PresentBackend> Title<B> {
         if !info.render_target() {
             self.unloaded.insert(key);
         }
+        let layout_id = layout_id(&info.layout);
         self.textures.insert(
             key,
             Tracked {
@@ -362,6 +378,9 @@ impl<B: PresentBackend> Title<B> {
                 uploads: 0,
                 hot: 0,
                 probe: None,
+                gpu_written: false,
+                target_binds: 0,
+                layout_id,
             },
         );
         true
@@ -387,6 +406,23 @@ impl<B: PresentBackend> Title<B> {
         }
     }
 
+    /// The GPU wrote `key` (a target bind, a copy destination, a UAV): its
+    /// contents no longer come from title memory and it cannot be given up.
+    pub fn mark_gpu_written(&mut self, key: usize) {
+        if let Some(t) = self.textures.get_mut(&key) {
+            t.gpu_written = true;
+        }
+    }
+
+    /// A draw or clear bound `key` as a render target: it has been written,
+    /// and is counted for the usage report.
+    pub fn mark_target(&mut self, key: usize) {
+        if let Some(t) = self.textures.get_mut(&key) {
+            t.gpu_written = true;
+            t.target_binds += 1;
+        }
+    }
+
     /// Host textures made, the bytes of title memory they duplicate, and how
     /// many of those are linear textures that could be views of title memory.
     pub fn resident(&self) -> (usize, usize, usize, usize) {
@@ -407,13 +443,159 @@ impl<B: PresentBackend> Title<B> {
         (self.textures.len(), bytes, linear.0, linear.1)
     }
 
+    /// Bytes the backend actually allocated for those textures, counting one
+    /// backing image once however many title keys alias it.
+    pub fn allocated(&self) -> usize {
+        let mut seen = std::collections::HashSet::new();
+        let mut bytes = 0;
+        for t in self.textures.values() {
+            if seen.insert(Rc::as_ptr(&t.texture) as usize) {
+                bytes += self.host.backend.allocated_size(&t.texture);
+            }
+        }
+        bytes
+    }
+
+    /// Title bytes summed over every realized key, aliases included: what
+    /// one host texture per key would have duplicated.
+    pub fn key_bytes(&self) -> usize {
+        self.textures.values().map(|t| t.info.size).sum()
+    }
+
+    /// Ways the realized set still duplicates backing storage:
+    /// `(same-layout groups with different resource descriptions, extra keys,
+    /// extra bytes, bytes in overlapping non-identical ranges)`. Equal
+    /// layouts with different formats could share one image through views;
+    /// overlapping ranges need a range index before they can share.
+    pub fn alias_opportunities(&self) -> (usize, usize, usize, usize) {
+        let mut groups: HashMap<(usize, usize, u64), Vec<&Tracked<B>>> = HashMap::new();
+        let mut unique: Vec<(usize, usize, u64)> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for t in self.textures.values() {
+            let at = t.info.memory as usize;
+            let key = (at, t.info.size, t.layout_id);
+            groups.entry(key).or_default().push(t);
+            if seen.insert(Rc::as_ptr(&t.texture) as usize) {
+                unique.push(key);
+            }
+        }
+        let (mut multi, mut extra_keys, mut extra_bytes) = (0, 0, 0);
+        for (key, members) in &groups {
+            let mut descs = std::collections::HashSet::new();
+            for t in members {
+                descs.insert((t.info.format, t.info.width, t.info.height, t.info.flags));
+            }
+            if descs.len() > 1 {
+                multi += 1;
+                extra_keys += descs.len() - 1;
+                extra_bytes += key.1 * (descs.len() - 1);
+            }
+        }
+        unique.sort_unstable();
+        let (mut overlaps, mut overlap_bytes, mut max_end) = (0, 0, 0);
+        for &(at, size, _) in &unique {
+            if at < max_end {
+                overlaps += 1;
+                overlap_bytes += size.min(max_end - at);
+            }
+            max_end = max_end.max(at + size);
+        }
+        (multi, extra_keys, extra_bytes, overlap_bytes)
+    }
+
+    /// Keys of host textures per backing image.
+    fn holders(&self) -> HashMap<usize, usize> {
+        let mut holders: HashMap<usize, usize> = HashMap::new();
+        for t in self.textures.values() {
+            *holders.entry(Rc::as_ptr(&t.texture) as usize).or_default() += 1;
+        }
+        holders
+    }
+
+    /// Whether `t`, whose backing is held by `holders` keys, has a strong
+    /// reference from anywhere but this map and the title-resource map (two
+    /// per key: a live heap, view, draw or copy keeps it).
+    fn internally_held(t: &Tracked<B>, holders: usize) -> bool {
+        Rc::strong_count(&t.texture) <= holders * 2
+    }
+
     /// Host textures whose only strong references are this map and the
     /// title-resource map (no live heap/view keeps them).
     pub fn unreferenced(&self) -> usize {
+        let holders = self.holders();
         self.textures
             .values()
-            .filter(|t| Rc::strong_count(&t.texture) <= 2)
+            .filter(|t| {
+                let ptr = Rc::as_ptr(&t.texture) as usize;
+                Self::internally_held(t, holders.get(&ptr).copied().unwrap_or(1))
+            })
             .count()
+    }
+
+    /// Unique host backing bytes by kind (depth, render target, unordered
+    /// access, sampled) as (kind, keys, bytes), and the largest backing
+    /// images, for deciding what can actually be given up.
+    pub fn breakdown(&self) -> (Vec<(&'static str, usize, usize)>, Vec<String>) {
+        let holders = self.holders();
+        let mut seen = std::collections::HashSet::new();
+        let mut kinds: Vec<(&'static str, usize, usize)> = vec![
+            ("depth", 0, 0),
+            ("render-target", 0, 0),
+            ("unordered", 0, 0),
+            ("sampled", 0, 0),
+            ("gpu-written", 0, 0),
+            ("target-never-written", 0, 0),
+        ];
+        let mut top: Vec<(usize, String)> = Vec::new();
+        for (&key, t) in &self.textures {
+            let ptr = Rc::as_ptr(&t.texture) as usize;
+            let ext = Rc::strong_count(&t.texture)
+                .saturating_sub(holders.get(&ptr).copied().unwrap_or(1) * 2);
+            let i = if t.info.flags & DEPTH_STENCIL != 0 {
+                0
+            } else if t.info.flags & RENDER_TARGET != 0 {
+                1
+            } else if t.info.flags & UNORDERED_ACCESS != 0 {
+                2
+            } else {
+                3
+            };
+            kinds[i].1 += 1;
+            if t.gpu_written {
+                kinds[4].1 += 1;
+            } else if t.info.render_target() {
+                kinds[5].1 += 1;
+            }
+            if seen.insert(ptr) {
+                kinds[i].2 += t.info.size;
+                if t.gpu_written {
+                    kinds[4].2 += t.info.size;
+                } else if t.info.render_target() {
+                    kinds[5].2 += t.info.size;
+                }
+                top.push((
+                    t.info.size,
+                    format!(
+                        "{:#x}+{} {}x{}x{} fmt={} flags={:#x} mips={} ext={} uploads={} binds={} gpu={} key={key:#x}",
+                        t.info.memory as usize,
+                        t.info.size,
+                        t.info.width,
+                        t.info.height,
+                        t.info.depth_or_layers,
+                        t.info.format,
+                        t.info.flags,
+                        t.info.layout.mips.len(),
+                        ext,
+                        t.uploads,
+                        t.target_binds,
+                        t.gpu_written,
+                    ),
+                ));
+            }
+        }
+        top.sort_by_key(|(size, _)| std::cmp::Reverse(*size));
+        top.truncate(12);
+        (kinds, top.into_iter().map(|(_, s)| s).collect())
     }
 
     /// How many times title texture `key`'s memory was detiled into its host texture.
@@ -422,15 +604,22 @@ impl<B: PresentBackend> Title<B> {
     }
 
     /// Gives up sampled host textures that no live heap or view references,
-    /// until their total is within `limit` bytes. Their title memory stays
-    /// authoritative; a later `realize` detiles them again.
+    /// until their unique backing total is within `limit` bytes. Their title
+    /// memory stays authoritative; a later `realize` detiles them again.
     pub fn evict_textures(&mut self, limit: usize) -> (usize, usize) {
-        let mut total: usize = self
-            .textures
-            .values()
-            .filter(|t| !t.info.render_target())
-            .map(|t| t.info.size)
-            .sum();
+        let mut holders = self.holders();
+        let mut seen = std::collections::HashSet::new();
+        let mut total: usize = 0;
+        for t in self.textures.values() {
+            // A UAV's contents may have been written through a descriptor this
+            // host cannot attribute yet, so it stays pinned.
+            if t.gpu_written || t.info.flags & UNORDERED_ACCESS != 0 {
+                continue;
+            }
+            if seen.insert(Rc::as_ptr(&t.texture) as usize) {
+                total += t.info.size;
+            }
+        }
         if total <= limit {
             return (0, 0);
         }
@@ -438,7 +627,11 @@ impl<B: PresentBackend> Title<B> {
             .textures
             .iter()
             .filter(|(_, t)| {
-                !t.info.render_target() && Rc::strong_count(&t.texture) <= 2
+                if t.gpu_written || t.info.flags & UNORDERED_ACCESS != 0 {
+                    return false;
+                }
+                let ptr = Rc::as_ptr(&t.texture) as usize;
+                Self::internally_held(t, holders.get(&ptr).copied().unwrap_or(1))
             })
             .map(|(&k, _)| k)
             .collect();
@@ -448,6 +641,7 @@ impl<B: PresentBackend> Title<B> {
                 break;
             }
             let Some(t) = self.textures.remove(&key) else { continue };
+            let ptr = Rc::as_ptr(&t.texture) as usize;
             let size = t.info.size;
             self.pending.insert(key, t.info);
             self.host.forget_resource(key);
@@ -458,9 +652,14 @@ impl<B: PresentBackend> Title<B> {
                 w.dirty.remove(&key);
                 w.used.remove(&key);
             });
-            total = total.saturating_sub(size);
+            // The backing image is only freed when its last key goes.
+            let left = holders.entry(ptr).or_default();
+            *left = left.saturating_sub(1);
+            if *left == 0 {
+                total = total.saturating_sub(size);
+                bytes += size;
+            }
             n += 1;
-            bytes += size;
         }
         (n, bytes)
     }
@@ -503,7 +702,15 @@ impl<B: PresentBackend> Title<B> {
                 .unwrap_or(2048)
                 .saturating_mul(1024 * 1024)
         });
-        let (evicted, freed) = self.evict_textures(limit);
+        let (evicted, freed) = {
+            let frame = crate::frame::current();
+            if self.last_evict == frame {
+                (0, 0)
+            } else {
+                self.last_evict = frame;
+                self.evict_textures(limit)
+            }
+        };
         if evicted > 0 && std::env::var_os("VICTORY_TRACE_TEXTURE_MEMORY").is_some() {
             tracing::info!(evicted, freed, limit, "host texture budget eviction");
         }

@@ -17,6 +17,7 @@ use crate::hold::{Held, Item, ValueWait, World};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
+use victory_backend::backend::ComputeBackend;
 use victory_backend::resources::{Format, GraphicsBackend, PresentBackend};
 
 /// A wait for a memory value (`Wait32BitValueX`, `Wait64BitValueX`): the value at `address`
@@ -207,6 +208,9 @@ pub struct Title<B: PresentBackend> {
             std::rc::Weak<B::Texture>,
         ),
     >,
+    /// The last frame texture eviction ran: it is O(realized textures), so
+    /// once a frame rather than once a submission.
+    pub(super) last_evict: u64,
     queues: HashMap<usize, Rc<B::Queue>>,
     fences: HashMap<usize, Rc<B::Fence>>,
     held: Held<Rc<NativeList<B>>>,
@@ -228,6 +232,7 @@ impl<B: PresentBackend> Title<B> {
             libraries: Default::default(),
             textures: Default::default(),
             backing: Default::default(),
+            last_evict: u64::MAX,
             unloaded: std::collections::HashSet::new(),
             hot_keys: Vec::new(),
             hot_cursor: 0,
@@ -465,15 +470,64 @@ impl<B: PresentBackend> Title<B> {
             let frame = crate::frame::current();
             if frame.is_multiple_of(64) {
                 let (n, bytes, linear_n, linear_bytes) = self.resident();
+                let allocated = self.allocated();
+                let key_bytes = self.key_bytes();
+                let (pools, pool_bytes, mappings, mapped_bytes) = self.host.pool_stats();
+                #[cfg(target_os = "macos")]
+                let (footprint, swap) = (
+                    victory_platform::mem::footprint(),
+                    victory_platform::mem::swap_used(),
+                );
+                #[cfg(not(target_os = "macos"))]
+                let (footprint, swap) = (0usize, 0usize);
+                let usage = self.host.backend.memory_usage();
                 tracing::info!(
                     frame,
                     textures = n,
                     bytes,
+                    allocated,
+                    key_bytes,
+                    aliased = key_bytes.saturating_sub(bytes),
                     linear_n,
                     linear_bytes,
                     unreferenced = self.unreferenced(),
+                    unset_roots = self.host.unset_roots(),
+                    no_targets = self.host.no_targets(),
+                    passes = self.host.passes(),
                     "host textures resident"
                 );
+                tracing::info!(
+                    frame,
+                    pools,
+                    pool_bytes,
+                    mappings,
+                    mapped_bytes,
+                    footprint,
+                    swap,
+                    metal_allocated = usage.allocated,
+                    metal_recommended = usage.recommended,
+                    metal_headroom = usage.recommended.saturating_sub(usage.allocated),
+                    "host memory"
+                );
+                let (kinds, top) = self.breakdown();
+                for (kind, keys, kind_bytes) in kinds {
+                    tracing::info!(frame, kind, keys, bytes = kind_bytes, "host textures by kind");
+                }
+                if frame.is_multiple_of(512) {
+                    let (groups, extra_keys, extra_bytes, overlap_bytes) =
+                        self.alias_opportunities();
+                    tracing::info!(
+                        frame,
+                        groups,
+                        extra_keys,
+                        extra_bytes,
+                        overlap_bytes,
+                        "host texture alias opportunities"
+                    );
+                    for (i, t) in top.iter().enumerate() {
+                        tracing::info!(frame, rank = i, texture = t.as_str(), "largest host textures");
+                    }
+                }
             }
         }
         if self.surface.is_none() {

@@ -302,6 +302,49 @@ pub fn footprint() -> usize {
     }
 }
 
+/// `struct xsw_usage` from `sysctl vm.swapusage`, in bytes.
+#[repr(C)]
+#[derive(Default)]
+struct SwapUsage {
+    total: u64,
+    avail: u64,
+    used: u64,
+    pagesize: u32,
+    encrypted: u32,
+}
+
+/// System swap in use, in bytes: what makes a full-memory run visible
+/// outside the process (0 where the kernel does not report it).
+pub fn swap_used() -> usize {
+    unsafe extern "C" {
+        fn sysctlbyname(
+            name: *const std::ffi::c_char,
+            oldp: *mut std::ffi::c_void,
+            oldlenp: *mut usize,
+            newp: *mut std::ffi::c_void,
+            newlen: usize,
+        ) -> i32;
+    }
+    let mut usage = SwapUsage::default();
+    let mut len = std::mem::size_of::<SwapUsage>();
+    // SAFETY: the name is NUL terminated and `usage`/`len` describe a buffer
+    // of the kernel's documented size.
+    let ok = unsafe {
+        sysctlbyname(
+            c"vm.swapusage".as_ptr(),
+            (&mut usage as *mut SwapUsage).cast(),
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if ok == 0 && len >= std::mem::size_of::<SwapUsage>() {
+        usage.used as usize
+    } else {
+        0
+    }
+}
+
 /// The first mapped region that ends above `addr`: the one containing it, or
 /// the next one up. `None` if nothing is mapped from there on.
 pub fn next_region(addr: usize) -> Option<Region> {

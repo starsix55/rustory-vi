@@ -341,7 +341,31 @@ pub struct NativeList<B: GraphicsBackend> {
     state: State<B>,
 }
 
+/// D3D12's limits, which the title's root signature obeys: a slot or constant offset past these is
+/// a misread command, not a request to grow a host table. Growing it was able to reserve
+/// `u32::MAX` entries (Native-Victory #15) and exhaust command-buffer memory.
+const MAX_ROOT_SLOTS: usize = 64;
+const MAX_ROOT_CONSTANTS: usize = 64;
+const MAX_VERTEX_SLOTS: usize = 32;
+
+fn out_of_range(what: &str, value: usize, max: usize) {
+    static WARNED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    if WARNED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 20 {
+        tracing::warn!(what, value, max, "a title set a root parameter past D3D12's limit; ignored");
+    }
+}
+
 fn set<B: GraphicsBackend>(root: &mut Vec<Option<Root<B>>>, slot: usize, value: Root<B>) {
+    if slot >= MAX_ROOT_SLOTS {
+        out_of_range("root slot", slot, MAX_ROOT_SLOTS);
+        return;
+    }
+    if let Root::Constants(words) = &value
+        && words.len() > MAX_ROOT_CONSTANTS
+    {
+        out_of_range("root constants", words.len(), MAX_ROOT_CONSTANTS);
+        return;
+    }
     if root.len() <= slot {
         root.resize_with(slot + 1, || None);
     }
@@ -481,6 +505,18 @@ impl<B: GraphicsBackend> NativeList<B> {
     /// `SetComputeRoot32BitConstant(s)` / `SetGraphicsRoot32BitConstant(s)` at `offset` words into
     /// the parameter: the words before it keep what was set (zero if nothing was).
     pub fn set_root_constants_at(&mut self, compute: bool, slot: usize, offset: usize, words: &[u32]) {
+        if slot >= MAX_ROOT_SLOTS
+            || offset
+                .checked_add(words.len())
+                .is_none_or(|end| end > MAX_ROOT_CONSTANTS)
+        {
+            out_of_range(
+                "root constant offset",
+                offset.saturating_add(words.len()),
+                MAX_ROOT_CONSTANTS,
+            );
+            return;
+        }
         let root = if compute {
             &mut self.state.compute_root
         } else {
@@ -603,6 +639,10 @@ impl<B: GraphicsBackend> NativeList<B> {
 
     /// `IASetVertexBuffers` for one slot: the title address of its data (the stride is the pipeline's).
     pub fn set_vertex_buffer(&mut self, slot: usize, address: u64) {
+        if slot >= MAX_VERTEX_SLOTS {
+            out_of_range("vertex buffer slot", slot, MAX_VERTEX_SLOTS);
+            return;
+        }
         if self.state.vertex.len() <= slot {
             self.state.vertex.resize(slot + 1, 0);
         }
@@ -679,5 +719,32 @@ impl<B: GraphicsBackend> NativeList<B> {
             first_instance,
             wide,
         })
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod limit_tests {
+    use super::*;
+    use victory_metal::metal::Metal;
+
+    /// Native-Victory #15: a misread root slot used to resize the table to the
+    /// slot number, which could reserve `u32::MAX` entries.
+    #[test]
+    fn a_root_slot_past_d3d12s_limit_does_not_grow_the_table() {
+        let mut root = Vec::new();
+        set::<Metal>(&mut root, u32::MAX as usize, Root::View(0));
+        assert!(root.is_empty());
+        set::<Metal>(&mut root, MAX_ROOT_SLOTS - 1, Root::View(0));
+        assert_eq!(root.len(), MAX_ROOT_SLOTS);
+        assert!(root[MAX_ROOT_SLOTS - 1].is_some());
+    }
+
+    #[test]
+    fn root_constants_past_d3d12s_limit_are_ignored() {
+        let mut root = Vec::new();
+        set::<Metal>(&mut root, 2, Root::Constants(vec![0; MAX_ROOT_CONSTANTS + 1]));
+        assert!(root.is_empty());
+        set::<Metal>(&mut root, 2, Root::Constants(vec![0; MAX_ROOT_CONSTANTS]));
+        assert_eq!(root.len(), 3);
     }
 }
