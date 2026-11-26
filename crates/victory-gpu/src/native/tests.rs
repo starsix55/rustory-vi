@@ -734,3 +734,102 @@ fn descriptor_ranges_narrow_realization_and_dynamic_slots_do_not() {
     drop(heap);
     drop(views);
 }
+
+/// A fixed descriptor table range realizes only the pending textures inside
+/// that range; entries outside stay deferred for a later command.
+#[test]
+fn realize_pending_only_realizes_the_fixed_table_range() {
+    let Some(_h) = host() else { return };
+    let mem = Alias::new(4 * page_size().max(16384)).unwrap();
+    let pool = PoolInfo {
+        id: 9201,
+        base: mem.primary as usize,
+        len: mem.len,
+        memory_entry: None,
+    };
+    let observer = super::glue::pool_observer();
+    observer.pool_created(&pool);
+    observer.mapped(mem.alias as usize, mem.len, &pool, 0);
+
+    let keys: Vec<usize> = (0..4)
+        .map(|i| {
+            let res = crate::resource::test_texture_at(
+                mem.alias as u64 + i * 0x2000,
+                (16, 16),
+                1,
+                28,
+                Swizzle::LINEAR.0,
+                0,
+            );
+            res as usize
+        })
+        .collect();
+    let info = crate::resource::texture_info(keys[0] as _).unwrap();
+    let views = vec![0u32; 4 * 8];
+    let vstart = views.as_ptr() as u64;
+    // Create the heap and pending descriptions, but no descriptor views:
+    // `create_srv` calls `glue::mirror`, which takes the title lock itself.
+    let heap = with_title(|t| {
+        for &key in &keys {
+            t.texture_created(key, info.clone());
+        }
+        t.host.heap(HeapKind::Resource, vstart, 4).unwrap()
+    })
+    .unwrap();
+    for (i, &key) in keys.iter().enumerate() {
+        let mut srv = [0u32; 10];
+        (srv[0], srv[1], srv[5]) = (28, 4, 1);
+        crate::descriptor::create_srv(
+            std::ptr::null_mut(),
+            key as _,
+            &srv,
+            vstart + i as u64 * 32,
+        );
+    }
+    assert_eq!(heap.pending.borrow().len(), 4, "all four start pending");
+
+    let (list, stats) = with_title(|t| {
+        let pso = Rc::new(super::list::ComputePso {
+            pso: t
+                .host
+                .backend
+                .create_compute_pipeline(&fixture_affine())
+                .unwrap(),
+            threads: [64, 1, 1],
+            binding: Some(super::list::Binding {
+                table_entries: vec![(0, 2)],
+                table_dynamic: vec![],
+                ..Default::default()
+            }),
+        });
+        let mut list = NativeList::default();
+        list.set_compute_pipeline(&pso);
+        list.set_compute_root_table(0, &heap, 2);
+        list.dispatch(1, 1, 1).unwrap();
+        let lists = vec![Rc::new(list)];
+        let mut stats = crate::native::title::Stats::default();
+        let Title {
+            host,
+            pending,
+            textures,
+            backing,
+            unloaded,
+            ..
+        } = t;
+        crate::native::textures::realize_pending(
+            host, pending, textures, backing, unloaded, &mut stats, 0, 0, &lists,
+        )
+        .unwrap();
+        assert!(textures.contains_key(&keys[2]), "in-range entry realized");
+        assert!(textures.contains_key(&keys[3]), "in-range entry realized");
+        assert!(!textures.contains_key(&keys[0]), "below the table range stays pending");
+        assert!(!textures.contains_key(&keys[1]), "below the table range stays pending");
+        (lists, stats)
+    })
+    .unwrap();
+    assert!(stats.realize_required >= 2);
+    drop(list);
+    with_title(|t| t.host.drop_heap(vstart)).unwrap();
+    drop(heap);
+    drop(mem);
+}
