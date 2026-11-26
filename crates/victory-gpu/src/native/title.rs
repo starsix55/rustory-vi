@@ -405,7 +405,7 @@ impl<B: PresentBackend> Title<B> {
                 return;
             };
             let (submitted, _) = host.backend.queue_progress(&*q);
-            let heaps = super::textures::realize_pending(
+            let heaps = match super::textures::realize_pending(
                 host,
                 pending,
                 textures,
@@ -415,7 +415,21 @@ impl<B: PresentBackend> Title<B> {
                 queue,
                 submitted,
                 &lists,
-            );
+            ) {
+                Ok(heaps) => heaps,
+                Err(e) => {
+                    stats.refused += 1;
+                    tracing::error!(
+                        error = %e,
+                        "refusing a piece: a texture could not be realized; no placeholder rendering"
+                    );
+                    if std::env::var_os("VICTORY_ALLOW_PLACEHOLDERS").is_none() {
+                        tracing::error!("stopping the diagnostic run on the failed realization");
+                        std::process::exit(4);
+                    }
+                    Vec::new()
+                }
+            };
             let refs: Vec<&NativeList<B>> = lists.iter().map(|l| &**l).collect();
             if let Err(e) = host.execute(&q, &refs, &[], &[]) {
                 stats.refused += 1;

@@ -463,6 +463,33 @@ impl<B: GraphicsBackend> NativeHost<B> {
         true
     }
 
+    /// Title resource `key` was released. Descriptor entries naming it become
+    /// null (the typed spare), not pending: a stale descriptor is not a
+    /// texture the host should later resurrect.
+    pub fn release_texture_key(&self, key: usize) {
+        self.resources.borrow_mut().remove(&key);
+        let spare = match self.spare_texture(Format::Rgba8Unorm) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, "no spare texture for a released descriptor");
+                return;
+            }
+        };
+        for heap in self.heaps.borrow().iter() {
+            let indices: Vec<usize> = heap
+                .keys
+                .borrow()
+                .iter()
+                .filter(|(_, k)| **k == key)
+                .map(|(&i, _)| i)
+                .collect();
+            for index in indices {
+                self.backend.write_texture(&heap.heap, index, &spare, 0.0);
+                self.note_heap_key(heap, index, None, false);
+            }
+        }
+    }
+
     /// Remirrors every pending entry that names realized title texture `key`.
     /// Called after `realize`, and before a list that can index those heaps is
     /// encoded. Returns whether any entry was written.
@@ -559,7 +586,13 @@ impl<B: GraphicsBackend> NativeHost<B> {
                 mips,
                 format,
             } => {
-                if let Some(Res::Texture(tex)) = resources.get(&resource) {
+                if resource == 0 {
+                    // D3D12 null view: no resource to realize. The spare is the
+                    // defined null stand-in, not a placeholder awaiting data.
+                    let spare = self.spare_texture(format.unwrap_or(Format::Rgba8Unorm))?;
+                    self.backend.write_texture(&heap.heap, index, &spare, 0.0);
+                    self.note_heap_key(&heap, index, None, false);
+                } else if let Some(Res::Texture(tex)) = resources.get(&resource) {
                     match (mips, format) {
                         (Some((first, count)), Some(format)) if count > 0 => {
                             let v = self.backend.create_texture_view(

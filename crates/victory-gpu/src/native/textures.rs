@@ -679,6 +679,7 @@ impl<B: PresentBackend> Title<B> {
     }
 
     pub fn texture_released(&mut self, key: usize) {
+        self.host.release_texture_key(key);
         self.textures.remove(&key);
         self.pending.remove(&key);
         self.unloaded.remove(&key);
@@ -868,7 +869,7 @@ pub(super) fn realize_pending<B: PresentBackend>(
     queue: usize,
     submitted: u64,
     lists: &[Rc<NativeList<B>>],
-) -> Vec<Rc<NativeHeap<B>>> {
+) -> Result<Vec<Rc<NativeHeap<B>>>, String> {
     let mut heaps: Vec<Rc<NativeHeap<B>>> = Vec::new();
     let mut seen = std::collections::HashSet::new();
     let mut copies: Vec<usize> = Vec::new();
@@ -942,7 +943,12 @@ pub(super) fn realize_pending<B: PresentBackend>(
     }
 
     for key in copies {
-        if !textures.contains_key(&key) && realize_key(host, pending, textures, backing, unloaded, key) {
+        if !textures.contains_key(&key) {
+            if !realize_key(host, pending, textures, backing, unloaded, key) {
+                return Err(format!(
+                    "title texture {key:#x} named by a copy could not be realized"
+                ));
+            }
             upload_key(host, textures, stats, key);
         }
     }
@@ -966,21 +972,43 @@ pub(super) fn realize_pending<B: PresentBackend>(
         for (heap, index, key) in work {
             if !textures.contains_key(&key) {
                 if !realize_key(host, pending, textures, backing, unloaded, key) {
-                    continue;
+                    return Err(format!(
+                        "title texture {key:#x} named by heap {:#x} entry {index} could not be realized",
+                        heap.start
+                    ));
                 }
                 upload_key(host, textures, stats, key);
                 progress = true;
             }
             let handle = heap.start + index as u64 * NativeHost::<B>::step(heap.kind);
-            if let Ok(true) = host.mirror(handle) {
-                progress = true;
+            match host.mirror(handle) {
+                Ok(true) => progress = true,
+                Ok(false) => {
+                    return Err(format!(
+                        "descriptor {handle:#x} for texture {key:#x} was not remirrored"
+                    ));
+                }
+                Err(e) => {
+                    return Err(format!(
+                        "descriptor {handle:#x} for texture {key:#x} was not remirrored: {e}"
+                    ));
+                }
             }
         }
         if !progress {
             break;
         }
     }
-    heaps
+    for heap in &heaps {
+        if let Some(&index) = heap.pending.borrow().iter().next() {
+            let key = heap.keys.borrow().get(&index).copied().unwrap_or(0);
+            return Err(format!(
+                "heap {:#x} entry {index} (texture {key:#x}) is still a placeholder",
+                heap.start
+            ));
+        }
+    }
+    Ok(heaps)
 }
 
 /// Makes the host texture of title texture `key` if it has none yet and

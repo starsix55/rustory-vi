@@ -595,6 +595,10 @@ fn an_evicted_descriptor_entry_is_repointed_to_the_spare_and_back() {
     assert_eq!(h.heap_texture_refs().get(&0xBEEF), Some(&1));
     assert_eq!(h.pending_textures(), 0);
 
+    h.release_texture_key(0xBEEF);
+    assert!(h.heap_texture_refs().is_empty(), "release unpins the texture");
+    assert_eq!(h.pending_textures(), 0, "a released view becomes null");
+
     h.drop_heap(vstart);
     drop(vheap);
     drop(views);
@@ -625,7 +629,8 @@ fn realize_pending_realizes_textures_a_copy_names() {
         assert!(!textures.contains_key(&key));
         crate::native::textures::realize_pending(
             host, pending, textures, backing, unloaded, &mut stats, 0, 0, &lists,
-        );
+        )
+        .unwrap();
         assert!(textures.contains_key(&key), "the copy's texture was realized");
     })
     .unwrap();
@@ -647,4 +652,23 @@ fn queue_progress_counts_committed_and_completed_buffers() {
     let (submitted, completed) = h.backend.queue_progress(&q);
     assert!(submitted >= 1, "the command buffer was counted");
     assert_eq!(completed, submitted, "the completion handler caught up");
+}
+
+/// A D3D12 null SRV (resource 0) is a defined null, not a texture awaiting
+/// realization; it must not enter the pending set and abort strict mode.
+#[test]
+fn a_null_descriptor_is_not_a_pending_texture() {
+    let Some(h) = host() else { return };
+    let views = vec![0u32; 4 * 4];
+    let vstart = views.as_ptr() as u64;
+    let vheap = h.heap(HeapKind::Resource, vstart, 4).unwrap();
+    let mut srv = [0u32; 10];
+    (srv[0], srv[1], srv[5]) = (28, 4, 1);
+    crate::descriptor::create_srv(std::ptr::null_mut(), std::ptr::null(), &srv, vstart);
+    assert!(h.mirror(vstart).unwrap());
+    assert_eq!(h.pending_textures(), 0, "a null view is not pending");
+    assert!(h.heap_texture_refs().is_empty(), "a null view pins nothing");
+    h.drop_heap(vstart);
+    drop(vheap);
+    drop(views);
 }
