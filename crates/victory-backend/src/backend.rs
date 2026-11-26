@@ -115,6 +115,13 @@ pub trait ComputeBackend {
         MemoryUsage::default()
     }
 
+    /// `(submitted, completed)` command-buffer serials for a queue. A backend
+    /// that cannot report them returns `(0, 0)`; the host then treats the
+    /// queue as idle only when it has never submitted.
+    fn queue_progress(&self, _queue: &Self::Queue) -> (u64, u64) {
+        (0, 0)
+    }
+
     fn create_queue(&self) -> Result<Self::Queue, String>;
     fn create_fence(&self, initial: u64) -> Result<Self::Fence, String>;
     /// Wrap `ptr..ptr+len` (page-aligned) without copying; it stays mapped while the buffer lives.

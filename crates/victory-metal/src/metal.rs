@@ -67,6 +67,9 @@ pub struct Queue(
     /// event (and encoders within one through a fence), counted by `.3`.
     pub(crate) Retained<ProtocolObject<dyn MTLEvent>>,
     pub(crate) std::cell::Cell<u64>,
+    /// Signalled with the same serial after the passes, for a reliable
+    /// submitted/completed query (the internal `MTLEvent` is not queryable).
+    pub(crate) Retained<ProtocolObject<dyn MTLSharedEvent>>,
 );
 pub struct Fence(pub(crate) Retained<ProtocolObject<dyn MTLSharedEvent>>);
 pub struct Pipeline(pub(crate) Retained<ProtocolObject<dyn MTLComputePipelineState>>);
@@ -173,10 +176,21 @@ impl ComputeBackend for Metal {
         }
     }
 
+    fn queue_progress(&self, queue: &Queue) -> (u64, u64) {
+        (queue.3.get(), queue.4.signaledValue())
+    }
+
     fn create_queue(&self) -> Result<Queue, String> {
         let q = self.dev.newCommandQueue().ok_or("newCommandQueue failed")?;
         let order = self.dev.newEvent().ok_or("newEvent failed")?;
-        Ok(Queue(q, std::cell::Cell::new(false), order, std::cell::Cell::new(0)))
+        let progress = self.dev.newSharedEvent().ok_or("newSharedEvent failed")?;
+        Ok(Queue(
+            q,
+            std::cell::Cell::new(false),
+            order,
+            std::cell::Cell::new(0),
+            progress,
+        ))
     }
 
     fn create_fence(&self, initial: u64) -> Result<Fence, String> {

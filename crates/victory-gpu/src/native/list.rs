@@ -25,10 +25,22 @@ pub struct NativeHeap<B: GraphicsBackend> {
     pub mirrored: std::cell::RefCell<std::collections::HashMap<usize, [u8; 12]>>,
     /// The title texture key each entry names, when it names one.
     pub keys: std::cell::RefCell<std::collections::HashMap<usize, usize>>,
+    /// Entries whose texture is not resident: they name the spare and must be
+    /// remirrored after the texture is realized again.
+    pub pending: std::cell::RefCell<std::collections::HashSet<usize>>,
+    /// Entries that name a real texture and therefore pin it.
+    pub resident: std::cell::RefCell<std::collections::HashSet<usize>>,
     /// The last frame a draw, dispatch, descriptor write or table check named
     /// this heap. Entries of a heap idle for many frames are candidates for
     /// reclamation, not proof that they are dead.
     pub last_used: std::cell::Cell<u64>,
+    /// The queue and its submitted serial when a list last used this heap:
+    /// entries may only be repointed after that serial completes.
+    pub last_queue: std::cell::Cell<usize>,
+    pub last_serial: std::cell::Cell<u64>,
+    /// Whether every key in this heap has been marked for the background
+    /// scanner since the last key change.
+    pub marked: std::cell::Cell<bool>,
 }
 
 /// How a translated title shader's arguments are laid out (`victory_shader::emit::HostShader`):

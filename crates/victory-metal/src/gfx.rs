@@ -817,10 +817,10 @@ impl GraphicsBackend for Metal {
         // With the pool set on the queue the encoders do not name the title's buffers, so Metal
         // cannot order them: this command buffer starts after the previous one finished, and each
         // encoder after the one before.
+        let serial = queue.3.get() + 1;
         let set_on_queue = queue.1.get();
         let order = set_on_queue.then(|| {
-            let n = queue.3.get();
-            queue.3.set(n + 1);
+            let n = serial - 1;
             if n > 0 {
                 cb.encodeWaitForEvent_value(&queue.2, n);
             }
@@ -838,8 +838,12 @@ impl GraphicsBackend for Metal {
             }
         }
         if set_on_queue {
-            cb.encodeSignalEvent_value(&queue.2, queue.3.get());
+            cb.encodeSignalEvent_value(&queue.2, serial);
         }
+        // Completion for descriptor repoint safety: the command buffer signals
+        // this after all passes; a failed buffer does not signal, so repointing
+        // stays blocked (conservative).
+        cb.encodeSignalEvent_value(ProtocolObject::from_ref(&*queue.4), serial);
         for (f, v) in work.signals {
             cb.encodeSignalEvent_value(ProtocolObject::from_ref(&*f.0), *v);
         }
@@ -881,6 +885,7 @@ impl GraphicsBackend for Metal {
         });
         // SAFETY: the block is retained by Metal until it has run.
         unsafe { cb.addCompletedHandler(&*failed as *const _ as *mut _) };
+        queue.3.set(serial);
         cb.commit();
         Ok(())
     }

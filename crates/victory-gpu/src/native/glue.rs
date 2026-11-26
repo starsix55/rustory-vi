@@ -571,7 +571,9 @@ pub(crate) fn mirror(handle: u64) {
     with_title(|t| {
         match crate::descriptor::view(handle) {
             // A texture the title placed in its own memory has no resource object: the host
-            // makes one the first time a view names it.
+            // makes one when a view, a target or a clear first needs it. Descriptor entries are
+            // recorded as pending here; `realize_pending` resolves them before the list that can
+            // index the heap is encoded.
             Some(crate::descriptor::View::Placed(_, res, d)) if res[0] > 1 => {
                 let address = u64::from(d[10]) | u64::from(d[11]) << 32;
                 let key = super::textures::placed_key(address, &res);
@@ -579,7 +581,6 @@ pub(crate) fn mirror(handle: u64) {
                     && let Some(info) = crate::resource::placed_info(address, &res)
                 {
                     t.texture_created(key, info);
-                    t.realize(key);
                 }
                 t.mark_used(key);
             }
@@ -587,7 +588,6 @@ pub(crate) fn mirror(handle: u64) {
             Some(
                 crate::descriptor::View::Shader(r, _) | crate::descriptor::View::Unordered(r, ..),
             ) => {
-                t.realize(r);
                 t.mark_used(r);
             }
             _ => {}

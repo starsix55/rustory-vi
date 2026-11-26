@@ -11,7 +11,7 @@
 //! (`MTLSharedEvent`); behind held work they are held too, so that they stay in order.
 
 use super::host::NativeHost;
-use super::list::{Binding, ComputePso, NativeList};
+use super::list::{Binding, ComputePso, NativeHeap, NativeList};
 use super::memory::PoolTable;
 use crate::hold::{Held, Item, ValueWait, World};
 use std::collections::HashMap;
@@ -312,8 +312,18 @@ impl<B: PresentBackend> Title<B> {
 
     /// `ExecuteCommandLists` on title queue `queue`: the lists' segments join what the queue holds
     /// and whatever may run goes to the GPU.
-    pub fn submit(&mut self, queue: usize, segments: Vec<(NativeList<B>, Vec<Wait>)>) {
-        self.sync_dirty();
+    /// Whether work that last named `heap` may still be running. Descriptor
+    /// entries may only be repointed after it completes.
+    pub(super) fn heap_in_flight(&self, heap: &NativeHeap<B>) -> bool {
+        let queue = heap.last_queue.get();
+        let Some(q) = self.queues.get(&queue) else {
+            return false;
+        };
+        let (_, completed) = self.host.backend.queue_progress(&**q);
+        heap.last_serial.get() > completed
+    }
+
+    pub fn submit(&mut self, queue: usize, segments: Vec<(NativeList<B>, Vec<Wait>)>) {        self.sync_dirty();
         for (list, waits) in segments {
             self.stats.segments += 1;
             let waits: Vec<ValueWait> = waits.into_iter().map(Into::into).collect();
@@ -376,6 +386,10 @@ impl<B: PresentBackend> Title<B> {
             held,
             signals,
             stats,
+            textures,
+            pending,
+            backing,
+            unloaded,
             ..
         } = self;
         let memory = host.memory();
@@ -390,10 +404,28 @@ impl<B: PresentBackend> Title<B> {
             let Some(q) = queues.get(&queue).cloned() else {
                 return;
             };
+            let (submitted, _) = host.backend.queue_progress(&*q);
+            let heaps = super::textures::realize_pending(
+                host,
+                pending,
+                textures,
+                backing,
+                unloaded,
+                stats,
+                queue,
+                submitted,
+                &lists,
+            );
             let refs: Vec<&NativeList<B>> = lists.iter().map(|l| &**l).collect();
             if let Err(e) = host.execute(&q, &refs, &[], &[]) {
                 stats.refused += 1;
                 tracing::warn!(error = %e, "a piece of title work was refused");
+            }
+            // The command buffer that uses these heaps now has its real serial;
+            // entries may be repointed once it completes.
+            let (now, _) = host.backend.queue_progress(&*q);
+            for heap in heaps {
+                heap.last_serial.set(now);
             }
         };
         let mut signal = |n: usize, _: u64| {

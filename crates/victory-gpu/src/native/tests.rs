@@ -6,11 +6,14 @@
 //! Skipped when Apple's Metal Shader Converter is not installed.
 
 use super::Host;
+use super::glue::with_title;
 use super::list::NativeList;
 use super::memory::{PoolInfo, PoolObserver};
+use super::title::Title;
 use std::rc::Rc;
 use victory_backend::backend::ComputeBackend;
 use victory_backend::resources::*;
+use victory_formats::texture::Swizzle;
 use victory_metal::mem::{Alias, page_size};
 use victory_metal::metal::Metal;
 
@@ -559,4 +562,89 @@ fn a_dispatch_with_an_unset_root_parameter_is_dropped_alone() {
         "the second dispatch ran: {:?}",
         &out[..4]
     );
+}
+
+/// A descriptor entry can be repointed at the spare while its texture is gone,
+/// then remirrored when the texture is realized again. This is the mechanism
+/// that lets a heap-referenced texture be reclaimed without a dangling entry.
+#[test]
+fn an_evicted_descriptor_entry_is_repointed_to_the_spare_and_back() {
+    let Some(h) = host() else { return };
+    let white = h
+        .texture(&TextureDesc::d2(Format::Rgba8Unorm, 1, 1))
+        .unwrap();
+    h.backend.upload_texture(&white, 0, 0, &[255; 4], 4, 0);
+    h.register_texture(0xBEEF, &white);
+
+    let views = vec![0u32; 4 * 4];
+    let vstart = views.as_ptr() as u64;
+    let vheap = h.heap(HeapKind::Resource, vstart, 4).unwrap();
+    let mut srv = [0u32; 10];
+    (srv[0], srv[1], srv[5]) = (28, 4, 1);
+    crate::descriptor::create_srv(std::ptr::null_mut(), 0xBEEF as _, &srv, vstart);
+    assert!(h.mirror(vstart).unwrap());
+    assert_eq!(h.heap_texture_refs().get(&0xBEEF), Some(&1));
+    assert_eq!(h.pending_textures(), 0);
+
+    h.evict_texture_key(0xBEEF, Format::Rgba8Unorm);
+    assert!(h.heap_texture_refs().is_empty(), "the real texture is released");
+    assert_eq!(h.pending_textures(), 1, "the entry names the spare");
+
+    h.register_texture(0xBEEF, &white);
+    assert!(h.remirror_texture(0xBEEF), "the entry names the texture again");
+    assert_eq!(h.heap_texture_refs().get(&0xBEEF), Some(&1));
+    assert_eq!(h.pending_textures(), 0);
+
+    h.drop_heap(vstart);
+    drop(vheap);
+    drop(views);
+}
+
+/// The encode-time pending path realizes a texture named by a copy command
+/// before the submission; it is the same `realize_key` used for descriptor
+/// entries, so a texture evicted between recording and encoding is restored.
+#[test]
+fn realize_pending_realizes_textures_a_copy_names() {
+    let Some(h) = host() else { return };
+    let pool = Pool::new(&h, 4);
+    let res = crate::resource::test_texture_at(pool.va(0), (16, 16), 1, 28, Swizzle::LINEAR.0, 0);
+    let key = res as usize;
+    let mut list = NativeList::default();
+    list.copy_texture(key, key);
+    let lists = vec![Rc::new(list)];
+    let mut stats = crate::native::title::Stats::default();
+    with_title(|t| {
+        let Title {
+            host,
+            pending,
+            textures,
+            backing,
+            unloaded,
+            ..
+        } = t;
+        assert!(!textures.contains_key(&key));
+        crate::native::textures::realize_pending(
+            host, pending, textures, backing, unloaded, &mut stats, 0, 0, &lists,
+        );
+        assert!(textures.contains_key(&key), "the copy's texture was realized");
+    })
+    .unwrap();
+}
+
+/// The queue's submitted/completed serials advance together after a fence
+/// wait; descriptor repointing uses this gate to avoid rewriting a heap an
+/// in-flight command buffer may still read.
+#[test]
+fn queue_progress_counts_committed_and_completed_buffers() {
+    let Some(h) = host() else { return };
+    let q = h.backend.create_queue().unwrap();
+    let f = h.backend.create_fence(0).unwrap();
+    let mut list = NativeList::default();
+    let pool = Pool::new(&h, 1);
+    list.fill(pool.va(0), 16, 0);
+    h.execute(&q, &[&list], &[], &[(&f, 1)]).unwrap();
+    assert!(h.backend.wait(&f, 1, 10_000));
+    let (submitted, completed) = h.backend.queue_progress(&q);
+    assert!(submitted >= 1, "the command buffer was counted");
+    assert_eq!(completed, submitted, "the completion handler caught up");
 }

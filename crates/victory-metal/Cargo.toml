@@ -22,3 +22,6 @@ objc2-quartz-core = "0.3"
 
 [lints]
 workspace = true
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+victory-platform.workspace = true

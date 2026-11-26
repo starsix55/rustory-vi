@@ -60,6 +60,27 @@ log="$run_dir/victory.log"
 export VICTORY_GUESS_GRAPHICS="${VICTORY_GUESS_GRAPHICS:-1}"
 # Press Enter (the pad's A) every 2 s from 4 s to 80 s unless VICTORY_KEYS is set.
 export VICTORY_KEYS="${VICTORY_KEYS:-$(seq 4 2 80 | sed 's/$/:Enter/' | paste -sd, -)}"
+
+swap_used_mb() {
+  local used
+  used=$(sysctl -n vm.swapusage 2>/dev/null | awk '{print $6}')
+  used=${used%M}
+  used=${used%.*}
+  if [[ "$used" =~ ^[0-9]+$ ]]; then
+    printf '%s\n' "$used"
+  else
+    printf '0\n'
+  fi
+}
+
+if [[ -n "${VICTORY_SWAP_LIMIT_MB:-}" ]]; then
+  used=$(swap_used_mb)
+  if (( used + 512 >= VICTORY_SWAP_LIMIT_MB )); then
+    echo "swap guard: refusing to start: system swap ${used} MiB leaves less than 512 MiB below ${VICTORY_SWAP_LIMIT_MB} MiB" | tee -a "$log"
+    exit 3
+  fi
+fi
+
 echo "Running $exe (console=$console)"
 echo "Log: $log"
 
@@ -71,20 +92,19 @@ fi
 guard=""
 if [[ -n "${VICTORY_SWAP_LIMIT_MB:-}" ]]; then
   # Opt-in safety: stop this run (never report it as a success) before system
-  # swap makes the whole Mac unresponsive. Parses `used = 12345.67M`.
+  # swap makes the whole Mac unresponsive. The pre-flight check above refuses
+  # to start without headroom; the poll bounds overshoot after it trips.
   (
     while kill -0 "$pid" 2>/dev/null; do
-      used=$(sysctl -n vm.swapusage | awk '{print $6}')
-      used=${used%M}
-      used=${used%.*}
-      if [[ "$used" =~ ^[0-9]+$ ]] && (( used > VICTORY_SWAP_LIMIT_MB )); then
+      used=$(swap_used_mb)
+      if (( used > VICTORY_SWAP_LIMIT_MB )); then
         echo "swap guard: system swap ${used} MiB > ${VICTORY_SWAP_LIMIT_MB} MiB; stopping the run" >> "$log"
         kill -TERM "$pid" 2>/dev/null
-        sleep 1
+        sleep 0.5
         kill -KILL "$pid" 2>/dev/null
         break
       fi
-      sleep 0.5
+      sleep 0.25
     done
   ) &
   guard=$!

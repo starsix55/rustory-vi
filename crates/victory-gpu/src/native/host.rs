@@ -35,6 +35,12 @@ pub struct NativeHost<B: GraphicsBackend> {
     /// retains the Metal texture itself, so these pin device memory even when
     /// the host's `Rc` map no longer holds the key.
     heap_refs: RefCell<HashMap<usize, usize>>,
+    /// How many heap entries currently name the spare for each title key:
+    /// a key with a count needs a remirror after realization.
+    pending_keys: RefCell<HashMap<usize, usize>>,
+    /// 1×1 textures a non-resident descriptor entry names until the real
+    /// texture is realized and the entry is remirrored, by host format.
+    spare: RefCell<HashMap<Format, Rc<B::Texture>>>,
     /// Draws and dispatches dropped because they read a root parameter the title never set.
     unset_roots: std::cell::Cell<u64>,
     /// Draws and clears dropped because none of their targets has a host texture.
@@ -154,6 +160,8 @@ impl<B: GraphicsBackend> NativeHost<B> {
             heaps: RefCell::default(),
             contract: RefCell::default(),
             heap_refs: RefCell::default(),
+            pending_keys: RefCell::default(),
+            spare: RefCell::default(),
             unset_roots: std::cell::Cell::new(0),
             no_targets: std::cell::Cell::new(0),
             passes: std::cell::Cell::new(0),
@@ -279,7 +287,12 @@ impl<B: GraphicsBackend> NativeHost<B> {
             table: Default::default(),
             mirrored: Default::default(),
             keys: Default::default(),
+            pending: Default::default(),
+            resident: Default::default(),
             last_used: Default::default(),
+            last_queue: Default::default(),
+            last_serial: Default::default(),
+            marked: Default::default(),
         });
         self.heaps.borrow_mut().push(heap.clone());
         Ok(heap)
@@ -300,10 +313,20 @@ impl<B: GraphicsBackend> NativeHost<B> {
             return;
         };
         let heap = heaps.remove(at);
-        let keys: Vec<usize> = heap.keys.borrow().values().copied().collect();
+        let resident = heap.resident.borrow().clone();
+        let keys: Vec<(usize, bool)> = heap
+            .keys
+            .borrow()
+            .iter()
+            .map(|(&index, &key)| (key, resident.contains(&index)))
+            .collect();
         let mut refs = self.heap_refs.borrow_mut();
-        for key in keys {
-            release_heap_ref(&mut refs, key);
+        for (key, is_resident) in keys {
+            if is_resident {
+                release_heap_ref(&mut refs, key);
+            } else {
+                self.pending_remove(key);
+            }
         }
     }
 
@@ -311,6 +334,16 @@ impl<B: GraphicsBackend> NativeHost<B> {
     /// entries name each. Snapshot for the residency report.
     pub fn heap_texture_refs(&self) -> HashMap<usize, usize> {
         self.heap_refs.borrow().clone()
+    }
+
+    /// The live descriptor heaps, for residency and in-flight checks.
+    pub fn heaps_snapshot(&self) -> Vec<Rc<NativeHeap<B>>> {
+        self.heaps.borrow().clone()
+    }
+
+    /// Descriptor entries currently naming the spare, awaiting remirror.
+    pub fn pending_textures(&self) -> usize {
+        self.pending_keys.borrow().values().sum()
     }
 
     /// Heaps no draw, dispatch, descriptor write or table check has named for
@@ -332,17 +365,132 @@ impl<B: GraphicsBackend> NativeHost<B> {
     }
 
     /// Records that heap entry `index` now names title texture `key` (or no
-    /// texture). The old entry's reference is released first.
-    fn note_heap_key(&self, heap: &NativeHeap<B>, index: usize, key: Option<usize>) {
+    /// texture), and whether it names the real texture (`resident`) or the
+    /// spare. Only resident entries pin the texture.
+    fn note_heap_key(
+        &self,
+        heap: &NativeHeap<B>,
+        index: usize,
+        key: Option<usize>,
+        resident: bool,
+    ) {
         let old = heap.keys.borrow_mut().remove(&index);
+        let was_resident = heap.resident.borrow_mut().remove(&index);
         let mut refs = self.heap_refs.borrow_mut();
         if let Some(old) = old {
-            release_heap_ref(&mut refs, old);
+            if was_resident {
+                release_heap_ref(&mut refs, old);
+            } else {
+                self.pending_remove(old);
+            }
         }
         if let Some(key) = key {
-            *refs.entry(key).or_default() += 1;
             heap.keys.borrow_mut().insert(index, key);
+            if resident {
+                heap.pending.borrow_mut().remove(&index);
+                heap.resident.borrow_mut().insert(index);
+                *refs.entry(key).or_default() += 1;
+            } else {
+                heap.resident.borrow_mut().remove(&index);
+                heap.pending.borrow_mut().insert(index);
+                self.pending_add(key);
+            }
+        } else {
+            heap.pending.borrow_mut().remove(&index);
         }
+        heap.marked.set(false);
+    }
+
+    fn pending_add(&self, key: usize) {
+        *self.pending_keys.borrow_mut().entry(key).or_default() += 1;
+    }
+
+    fn pending_remove(&self, key: usize) {
+        let mut pending = self.pending_keys.borrow_mut();
+        if let Some(n) = pending.get_mut(&key) {
+            *n = n.saturating_sub(1);
+            if *n == 0 {
+                pending.remove(&key);
+            }
+        }
+    }
+
+    /// A 1×1 texture a non-resident descriptor entry names. Depth gets a
+    /// depth-format stand-in; compressed and colour formats use RGBA8. Made
+    /// once per format.
+    fn spare_texture(&self, format: Format) -> Result<Rc<B::Texture>, String> {
+        let depth = matches!(format, Format::D32Float | Format::D32FloatS8 | Format::D16Unorm);
+        let key = if depth { format } else { Format::Rgba8Unorm };
+        if let Some(t) = self.spare.borrow().get(&key) {
+            return Ok(t.clone());
+        }
+        let mut desc = TextureDesc::d2(key, 1, 1);
+        desc.unordered_access = !depth;
+        desc.render_target = depth;
+        let t = Rc::new(self.backend.create_texture(&desc)?);
+        if !depth {
+            self.backend.upload_texture(&t, 0, 0, &[0, 0, 0, 0], 4, 4);
+        }
+        self.spare.borrow_mut().insert(key, t.clone());
+        Ok(t)
+    }
+
+    /// Repoints every heap entry that names title texture `key` at the spare,
+    /// releasing the real texture. The entry keeps `key`, so it can be
+    /// remirrored when the texture is realized again.
+    pub fn evict_texture_key(&self, key: usize, format: Format) -> bool {
+        self.resources.borrow_mut().remove(&key);
+        let spare = match self.spare_texture(format) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, "no spare texture for an evicted descriptor");
+                return false;
+            }
+        };
+        for heap in self.heaps.borrow().iter() {
+            let indices: Vec<usize> = heap
+                .keys
+                .borrow()
+                .iter()
+                .filter(|(_, k)| **k == key)
+                .map(|(&i, _)| i)
+                .collect();
+            for index in indices {
+                self.backend.write_texture(&heap.heap, index, &spare, 0.0);
+                self.note_heap_key(heap, index, Some(key), false);
+            }
+        }
+        true
+    }
+
+    /// Remirrors every pending entry that names realized title texture `key`.
+    /// Called after `realize`, and before a list that can index those heaps is
+    /// encoded. Returns whether any entry was written.
+    pub fn remirror_texture(&self, key: usize) -> bool {
+        if self.pending_keys.borrow().get(&key).copied().unwrap_or(0) == 0 {
+            return false;
+        }
+        let mut any = false;
+        for heap in self.heaps.borrow().iter() {
+            let indices: Vec<usize> = heap
+                .pending
+                .borrow()
+                .iter()
+                .copied()
+                .filter(|&i| heap.keys.borrow().get(&i) == Some(&key))
+                .collect();
+            for index in indices {
+                let handle = heap.start + index as u64 * Self::step(heap.kind);
+                match self.mirror(handle) {
+                    Ok(true) => any = true,
+                    Ok(false) => {}
+                    Err(e) => {
+                        tracing::warn!(error = %e, key, index, "a pending descriptor was not remirrored");
+                    }
+                }
+            }
+        }
+        any
     }
 
     /// The title released resource object `key`: later views naming it decode to nothing.
@@ -371,7 +519,7 @@ impl<B: GraphicsBackend> NativeHost<B> {
             .sum()
     }
 
-    fn step(kind: HeapKind) -> u64 {
+    pub(super) fn step(kind: HeapKind) -> u64 {
         u64::from(crate::descriptor::increment(u32::from(kind == HeapKind::Sampler)).unwrap_or(32))
     }
 
@@ -404,36 +552,42 @@ impl<B: GraphicsBackend> NativeHost<B> {
                 let (buf, ptr) = self.resolve(addr, u64::from(size))?;
                 self.backend
                     .write_buffer(&heap.heap, index, &buf, ptr, size);
-                self.note_heap_key(&heap, index, None);
+                self.note_heap_key(&heap, index, None, false);
             }
             Decoded::Image {
                 resource,
                 mips,
                 format,
             } => {
-                let Some(Res::Texture(tex)) = resources.get(&resource) else {
-                    return Ok(false);
-                };
-                match (mips, format) {
-                    (Some((first, count)), Some(format)) if count > 0 => {
-                        let v = self.backend.create_texture_view(
-                            tex,
-                            &ViewDesc {
-                                format,
-                                mips: (first as usize, count as usize),
-                                slices: (0, 1),
-                            },
-                        )?;
-                        self.backend.write_texture(&heap.heap, index, &v, 0.0);
+                if let Some(Res::Texture(tex)) = resources.get(&resource) {
+                    match (mips, format) {
+                        (Some((first, count)), Some(format)) if count > 0 => {
+                            let v = self.backend.create_texture_view(
+                                tex,
+                                &ViewDesc {
+                                    format,
+                                    mips: (first as usize, count as usize),
+                                    slices: (0, 1),
+                                },
+                            )?;
+                            self.backend.write_texture(&heap.heap, index, &v, 0.0);
+                        }
+                        _ => self.backend.write_texture(&heap.heap, index, tex, 0.0),
                     }
-                    _ => self.backend.write_texture(&heap.heap, index, tex, 0.0),
+                    self.note_heap_key(&heap, index, Some(resource), true);
+                } else {
+                    // Lazy descriptor: the title named the view but the texture
+                    // is not realized (or was evicted). The entry names the
+                    // spare until the texture is realized and remirrored.
+                    let spare = self.spare_texture(format.unwrap_or(Format::Rgba8Unorm))?;
+                    self.backend.write_texture(&heap.heap, index, &spare, 0.0);
+                    self.note_heap_key(&heap, index, Some(resource), false);
                 }
-                self.note_heap_key(&heap, index, Some(resource));
             }
             Decoded::Sampler { desc, lod_bias } => {
                 let s = self.backend.create_sampler(&desc)?;
                 self.backend.write_sampler(&heap.heap, index, &s, lod_bias);
-                self.note_heap_key(&heap, index, None);
+                self.note_heap_key(&heap, index, None, false);
             }
         }
         heap.mirrored.borrow_mut().insert(index, record_at(handle));
@@ -448,7 +602,7 @@ impl<B: GraphicsBackend> NativeHost<B> {
     /// they were last mirrored. The title copies records into its shader-visible heaps with plain
     /// stores (the content draws' constant buffers, from frame ~700), which no device call reports,
     /// so their host entries stayed empty and the shaders read zeros.
-    fn remirror_tables(&self, root: &[Option<Root<B>>], binding: Option<&Binding>) {
+    pub(super) fn remirror_tables(&self, root: &[Option<Root<B>>], binding: Option<&Binding>) {
         for (slot, r) in root.iter().enumerate() {
             let Some(Root::Table(h, at)) = r else { continue };
             h.last_used.set(crate::frame::current());
@@ -664,7 +818,12 @@ impl<B: GraphicsBackend> NativeHost<B> {
             table: Default::default(),
             mirrored: Default::default(),
             keys: Default::default(),
+            pending: Default::default(),
+            resident: Default::default(),
             last_used: Default::default(),
+            last_queue: Default::default(),
+            last_serial: Default::default(),
+            marked: Default::default(),
         });
         self.contract.borrow_mut().heap = Some(heap.clone());
         Ok(heap)

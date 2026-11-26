@@ -13,7 +13,9 @@
 //! next step. A change detiles the whole texture.
 
 use super::descriptors::format;
-use super::title::Title;
+use super::host::NativeHost;
+use super::list::{Cmd, NativeHeap, NativeList, Root};
+use super::title::{Stats, Title};
 use std::collections::HashMap;
 use std::rc::Rc;
 use victory_backend::resources::*;
@@ -313,77 +315,15 @@ impl<B: PresentBackend> Title<B> {
     /// Makes the host texture of title texture `key` if it has none yet and registers it for
     /// views. `false` when there is none (not a title texture, or one the host cannot represent).
     pub fn realize(&mut self, key: usize) -> bool {
-        if self.textures.contains_key(&key) {
-            return true;
-        }
-        let Some(info) = self.pending.remove(&key) else {
-            return false;
-        };
-        let Some(desc) = info.desc() else {
-            // Loud once per format: views of it get no texture and their draws sample nothing.
-            static SEEN: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
-            let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
-            if !seen.contains(&info.format) {
-                seen.push(info.format);
-                tracing::warn!(format = info.format, w = info.width, h = info.height, flags = info.flags, "a title texture format the host does not represent (first of this format)");
-            }
-            return false;
-        };
-        let bkey = info.backing_key();
-        let shared = self.backing.get(&bkey).and_then(|(old, tex)| {
-            (old.layout == info.layout)
-                .then(|| tex.upgrade())
-                .flatten()
-        });
-        let tex = match shared {
-            Some(t) => t,
-            None => {
-                let t = match self.host.texture(&desc) {
-                    Ok(t) => t,
-                    Err(e) => {
-                        tracing::warn!(error = %e, ?desc, "no host texture");
-                        return false;
-                    }
-                };
-                self.backing
-                    .insert(bkey, (info.clone(), Rc::downgrade(&t)));
-                t
-            }
-        };
-        self.host.register_texture(key, &tex);
-        // Render targets too: what the title (CPU, DMA) writes into their memory is uploaded when
-        // it changes, as it is not otherwise seen (a GPU write never changes title memory).
-        watch(|w| w.entries.insert(key, (info.memory as usize, info.size, info.render_target())));
-        start_scanner();
-        // Debugging (VICTORY_MAGENTA=1): render targets start magenta, so a frame that stays so
-        // was never drawn into, and a black one was drawn black.
-        if info.render_target() && std::env::var_os("VICTORY_MAGENTA").is_some() {
-            let m = &info.layout.mips[0];
-            let n = info.layout.desc.element_bytes as usize;
-            let row = m.width as usize * n;
-            let pixel = [0xffu8, 0, 0xff, 0xff];
-            let linear: Vec<u8> = (0..row * m.height as usize).map(|i| pixel[i % 4]).collect();
-            self.host.backend.upload_texture(&tex, 0, 0, &linear, row, row * m.height as usize);
-        }
-        if !info.render_target() {
-            self.unloaded.insert(key);
-        }
-        let layout_id = layout_id(&info.layout);
-        self.textures.insert(
-            key,
-            Tracked {
-                texture: tex,
-                info,
-                last: None,
-                uploads: 0,
-                hot: 0,
-                probe: None,
-                gpu_written: false,
-                target_binds: 0,
-                layout_id,
-            },
-        );
-        true
+        let Self {
+            host,
+            pending,
+            textures,
+            backing,
+            unloaded,
+            ..
+        } = self;
+        realize_key(host, pending, textures, backing, unloaded, key)
     }
 
     /// The format of the host texture of title texture `key`.
@@ -642,12 +582,29 @@ impl<B: PresentBackend> Title<B> {
         self.textures.get(&key).map_or(0, |t| t.uploads)
     }
 
-    /// Gives up sampled host textures that no live heap or view references,
-    /// until their unique backing total is within `limit` bytes. Their title
-    /// memory stays authoritative; a later `realize` detiles them again.
+    /// Gives up reconstructible host textures until their unique backing total
+    /// is within `limit` bytes. A descriptor entry naming one is repointed at
+    /// the spare first; `realize_pending` restores it before the next list that
+    /// can index its heap is encoded. Heaps used recently or still in flight
+    /// are left alone, so active bindless sets are not thrashed.
     pub fn evict_textures(&mut self, limit: usize) -> (usize, usize) {
+        /// Frames a heap stays hot after a list last named it.
+        const KEEP_FRAMES: u64 = 120;
+        let frame = crate::frame::current();
+        let mut blocked = std::collections::HashSet::new();
+        for heap in self.host.heaps_snapshot() {
+            let hot = frame.saturating_sub(heap.last_used.get()) < KEEP_FRAMES;
+            if hot || self.heap_in_flight(&heap) {
+                blocked.extend(heap.keys.borrow().values().copied());
+            }
+        }
+        let blocked_ptrs: std::collections::HashSet<usize> = self
+            .textures
+            .iter()
+            .filter(|(k, _)| blocked.contains(k))
+            .map(|(_, t)| Rc::as_ptr(&t.texture) as usize)
+            .collect();
         let mut holders = self.holders();
-        let pinned = self.heap_pinned();
         let mut seen = std::collections::HashSet::new();
         let mut total: usize = 0;
         for t in self.textures.values() {
@@ -657,7 +614,7 @@ impl<B: PresentBackend> Title<B> {
                 continue;
             }
             let ptr = Rc::as_ptr(&t.texture) as usize;
-            if pinned.contains(&ptr) {
+            if blocked_ptrs.contains(&ptr) {
                 continue;
             }
             if seen.insert(ptr) {
@@ -675,7 +632,7 @@ impl<B: PresentBackend> Title<B> {
                     return false;
                 }
                 let ptr = Rc::as_ptr(&t.texture) as usize;
-                !pinned.contains(&ptr)
+                !blocked_ptrs.contains(&ptr)
                     && Self::internally_held(t, holders.get(&ptr).copied().unwrap_or(1))
             })
             .map(|(&k, _)| k)
@@ -685,11 +642,22 @@ impl<B: PresentBackend> Title<B> {
             if total <= limit {
                 break;
             }
-            let Some(t) = self.textures.remove(&key) else { continue };
+            let Some(format) = self
+                .textures
+                .get(&key)
+                .map(|t| t.info.desc().map_or(Format::Rgba8Unorm, |d| d.format))
+            else {
+                continue;
+            };
+            if !self.host.evict_texture_key(key, format) {
+                continue;
+            }
+            let Some(t) = self.textures.remove(&key) else {
+                continue;
+            };
             let ptr = Rc::as_ptr(&t.texture) as usize;
             let size = t.info.size;
             self.pending.insert(key, t.info);
-            self.host.forget_resource(key);
             self.unloaded.remove(&key);
             self.hot_keys.retain(|&k| k != key);
             watch(|w| {
@@ -845,7 +813,260 @@ impl<B: PresentBackend> Title<B> {
 }
 
 /// The textures of a title host, by title resource key.
-pub type Textures<B> = HashMap<usize, Tracked<B>>;
+pub type Textures<B: ResourceBackend> = HashMap<usize, Tracked<B>>;
+
+/// Host textures by canonical title-memory range and layout.
+pub type BackingMap<B> = HashMap<
+    (usize, usize, u32, u32, u32, u32),
+    (TextureInfo, std::rc::Weak<<B as ResourceBackend>::Texture>),
+>;
+
+/// Uploads one newly realized texture from title memory immediately. It was
+/// realized after `sync_dirty` for the submission, so waiting for the next
+/// scanner round would sample an uninitialized host texture.
+fn upload_key<B: PresentBackend>(
+    host: &NativeHost<B>,
+    textures: &mut Textures<B>,
+    stats: &mut Stats,
+    key: usize,
+) {
+    let Some(t) = textures.get_mut(&key) else {
+        return;
+    };
+    let tiled = read_memory(t.info.memory, t.info.size);
+    let hash = blake3::hash(&tiled);
+    if t.last == Some(hash) {
+        return;
+    }
+    match upload(&host.backend, &t.texture, &t.info, &tiled) {
+        Ok(()) => {
+            t.last = Some(hash);
+            t.uploads += 1;
+            stats.detiles += 1;
+        }
+        Err(e) => {
+            t.last = Some(hash);
+            stats.undetilable += 1;
+            tracing::warn!(texture = key, error = %e, "a pending title texture was not detiled");
+        }
+    }
+}
+
+/// Before a list is encoded: refresh descriptor tables, then realize every
+/// pending entry in every heap the list can index and remirror its slot. This
+/// is what makes dynamic indexing correct after a texture was evicted or a
+/// heap entry was repointed at the spare.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn realize_pending<B: PresentBackend>(
+    host: &NativeHost<B>,
+    pending: &mut HashMap<usize, TextureInfo>,
+    textures: &mut Textures<B>,
+    backing: &mut BackingMap<B>,
+    unloaded: &mut std::collections::HashSet<usize>,
+    stats: &mut Stats,
+    queue: usize,
+    submitted: u64,
+    lists: &[Rc<NativeList<B>>],
+) -> Vec<Rc<NativeHeap<B>>> {
+    let mut heaps: Vec<Rc<NativeHeap<B>>> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut copies: Vec<usize> = Vec::new();
+    let mut add = |h: &Rc<NativeHeap<B>>| {
+        if seen.insert(Rc::as_ptr(h) as usize) {
+            heaps.push(h.clone());
+        }
+    };
+    for list in lists {
+        for cmd in &list.cmds {
+            match cmd {
+                Cmd::Draw {
+                    root,
+                    binding,
+                    heaps: (resource, sampler),
+                    ..
+                } => {
+                    host.remirror_tables(root, binding.as_deref());
+                    if let Some(h) = resource {
+                        add(h);
+                    }
+                    if let Some(h) = sampler {
+                        add(h);
+                    }
+                    for r in root.iter().flatten() {
+                        if let Root::Table(h, _) = r {
+                            add(h);
+                        }
+                    }
+                }
+                Cmd::Dispatch {
+                    pso, root, heaps, ..
+                } => {
+                    host.remirror_tables(root, pso.binding.as_ref());
+                    if let Some(h) = &heaps.0 {
+                        add(h);
+                    }
+                    if let Some(h) = &heaps.1 {
+                        add(h);
+                    }
+                    for r in root.iter().flatten() {
+                        if let Root::Table(h, _) = r {
+                            add(h);
+                        }
+                    }
+                }
+                Cmd::CopyTexture { dst, src } | Cmd::CopyTextureRegion { dst, src, .. } => {
+                    copies.push(*dst);
+                    copies.push(*src);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // A command buffer for this list is about to be committed. Entries in
+    // these heaps may not be repointed until it completes.
+    let frame = crate::frame::current();
+    for heap in &heaps {
+        heap.last_used.set(frame);
+        heap.last_queue.set(queue);
+        heap.last_serial.set(submitted.saturating_add(1));
+        if !heap.marked.get() {
+            watch(|w| {
+                for &key in heap.keys.borrow().values() {
+                    w.used.insert(key);
+                }
+            });
+            heap.marked.set(true);
+        }
+    }
+
+    for key in copies {
+        if !textures.contains_key(&key) && realize_key(host, pending, textures, backing, unloaded, key) {
+            upload_key(host, textures, stats, key);
+        }
+    }
+
+    // Two passes: remirroring a changed title record can introduce a new
+    // pending key, which must be realized before the same submission.
+    for _ in 0..2 {
+        let mut work: Vec<(Rc<NativeHeap<B>>, usize, usize)> = Vec::new();
+        for heap in &heaps {
+            let keys = heap.keys.borrow();
+            for &index in heap.pending.borrow().iter() {
+                if let Some(&key) = keys.get(&index) {
+                    work.push((heap.clone(), index, key));
+                }
+            }
+        }
+        if work.is_empty() {
+            break;
+        }
+        let mut progress = false;
+        for (heap, index, key) in work {
+            if !textures.contains_key(&key) {
+                if !realize_key(host, pending, textures, backing, unloaded, key) {
+                    continue;
+                }
+                upload_key(host, textures, stats, key);
+                progress = true;
+            }
+            let handle = heap.start + index as u64 * NativeHost::<B>::step(heap.kind);
+            if let Ok(true) = host.mirror(handle) {
+                progress = true;
+            }
+        }
+        if !progress {
+            break;
+        }
+    }
+    heaps
+}
+
+/// Makes the host texture of title texture `key` if it has none yet and
+/// registers it for views. Shared by [`Title::realize`] and the encode-time
+/// pending realization path, which has the fields split out of `Title`.
+pub(super) fn realize_key<B: PresentBackend>(
+    host: &NativeHost<B>,
+    pending: &mut HashMap<usize, TextureInfo>,
+    textures: &mut Textures<B>,
+    backing: &mut BackingMap<B>,
+    unloaded: &mut std::collections::HashSet<usize>,
+    key: usize,
+) -> bool {
+    if textures.contains_key(&key) {
+        return true;
+    }
+    let Some(info) = pending.remove(&key) else {
+        return false;
+    };
+    let Some(desc) = info.desc() else {
+        // Loud once per format: views of it get no texture and their draws sample nothing.
+        static SEEN: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
+        let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+        if !seen.contains(&info.format) {
+            seen.push(info.format);
+            tracing::warn!(format = info.format, w = info.width, h = info.height, flags = info.flags, "a title texture format the host does not represent (first of this format)");
+        }
+        return false;
+    };
+    let bkey = info.backing_key();
+    let shared = backing.get(&bkey).and_then(|(old, tex)| {
+        (old.layout == info.layout)
+            .then(|| tex.upgrade())
+            .flatten()
+    });
+    let tex = match shared {
+        Some(t) => t,
+        None => {
+            let t = match host.texture(&desc) {
+                Ok(t) => t,
+                Err(e) => {
+                    tracing::warn!(error = %e, ?desc, "no host texture");
+                    return false;
+                }
+            };
+            backing.insert(bkey, (info.clone(), Rc::downgrade(&t)));
+            t
+        }
+    };
+    host.register_texture(key, &tex);
+    // A descriptor entry that was repointed at the spare while the texture
+    // was gone can name the real texture again now.
+    host.remirror_texture(key);
+    // Render targets too: what the title (CPU, DMA) writes into their memory is uploaded when
+    // it changes, as it is not otherwise seen (a GPU write never changes title memory).
+    watch(|w| w.entries.insert(key, (info.memory as usize, info.size, info.render_target())));
+    start_scanner();
+    // Debugging (VICTORY_MAGENTA=1): render targets start magenta, so a frame that stays so
+    // was never drawn into, and a black one was drawn black.
+    if info.render_target() && std::env::var_os("VICTORY_MAGENTA").is_some() {
+        let m = &info.layout.mips[0];
+        let n = info.layout.desc.element_bytes as usize;
+        let row = m.width as usize * n;
+        let pixel = [0xffu8, 0, 0xff, 0xff];
+        let linear: Vec<u8> = (0..row * m.height as usize).map(|i| pixel[i % 4]).collect();
+        host.backend.upload_texture(&tex, 0, 0, &linear, row, row * m.height as usize);
+    }
+    if !info.render_target() {
+        unloaded.insert(key);
+    }
+    let layout_id = layout_id(&info.layout);
+    textures.insert(
+        key,
+        Tracked {
+            texture: tex,
+            info,
+            last: None,
+            uploads: 0,
+            hot: 0,
+            probe: None,
+            gpu_written: false,
+            target_binds: 0,
+            layout_id,
+        },
+    );
+    true
+}
 
 #[cfg(all(test, target_os = "macos"))]
 mod tests {

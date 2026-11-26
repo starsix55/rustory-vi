@@ -882,6 +882,7 @@ dependencies = [
  "objc2-quartz-core",
  "tracing",
  "victory-backend",
+ "victory-platform",
 ]
 
 [[package]]

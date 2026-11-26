@@ -202,7 +202,11 @@ fn a_placed_texture_view_makes_and_fills_its_texture() {
     // The heap is made (and the view written into it) when a list names it.
     let key = crate::native::textures::placed_key(pool.va(0), &words);
     with_title(|t| {
-        assert!(t.host.knows(key), "made when the view was written");
+        assert!(
+            !t.host.knows(key),
+            "the descriptor is pending until a list can index it"
+        );
+        assert!(t.realize(key), "realization makes the placed texture");
         t.sync_textures();
     });
     let out = read_mip(key, 0, 32, 32);

@@ -80,14 +80,25 @@ The drawable layer and presentation. Presentation never waits for the GPU.
    clear, a copy destination or a UAV. A GPU-written texture may not be given
    up until its contents are downloaded or the title proves it no longer needs
    them.
-5. **Eviction is safe only with a completion gate.** A texture must be
+5. **Descriptor entries are repointable.** A heap entry names a title key and
+   either the real texture or a typed 1×1 spare. Lazy realization happens at
+   encode time for every heap the list can index; dynamic indexing is therefore
+   valid even after an eviction. The title record, not the host entry, is the
+   source of truth, and its generation rejects reused slots.
+6. **Eviction is safe only with a completion gate.** A texture must be
    unbound and older than the last completed submission. Metal retains
    resources named by a committed command buffer, but the host must not reuse
-   or download their bytes while work may still write them.
-6. **Budgets are backend working-set budgets.** The title's 13.5 GiB guest
+   or download their bytes while work may still write them. Repointing a
+   descriptor heap entry additionally waits for the heap's last submission
+   serial to complete.
+7. **Budgets are backend working-set budgets.** The title's 13.5 GiB guest
    reservation and the host's device allocations compete for the same Apple
    Silicon memory. A host texture budget that ignores
    `recommendedMaxWorkingSetSize` is not a memory policy.
+8. **Storage mode is not a memory saving by itself.** A 256 MiB synthetic
+   measurement showed `Shared` and `Private` within 0.1 MiB of the same
+   physical footprint and device allocation. Treat private storage as an
+   access/compression policy, not as duplication removal.
 
 ## Upstream decisions
 
@@ -97,6 +108,10 @@ The drawable layer and presentation. Presentation never waits for the GPU.
 | Xenia `texture_cache` | exact key + LRU, completion gate, mip/slice extents | exact-key-only as the sole identity | overlapping ranges and views still duplicate |
 | shadPS4 `texture_cache` | page-bucket range index, view arithmetic, dirty masks, download-before-free under pressure | exact-base-only `FindImageFromRange` | it does not find true overlaps |
 | VIctory #2286/#2162/#2455 | one host texture per texture memory, alias groups, depth twins | code copy | D3D12 host; port invariants |
+| VIctory descriptor host | repoint viewing slots to null, remirror on use, retire until submission | direct slot tagging | different descriptor API |
+| XCL `console_heap.rs` | descriptors are values, slot copy renumbers, lazy shared-heap pages | D3D12 heap plumbing | Metal argument buffers hold resource IDs |
+| Xenia `d3d12_command_processor` | two-level index → slot, fixed null stand-ins, completion-gated recycling | raw D3D12 code | portable design |
+| DXMT/Mullion descriptor heaps | `{resource_id, metadata}` records, CPU slot table, typed nulls | Wine/D3D12 thunks | portable layout/invariants |
 | VIPort `alias_source`/`alias_copy` | copy from a GPU-written alias when formats cannot share | direct code | different backend |
 | XCL `gpu/tiling.rs` | GFX10 tiling and format conformance | runtime/Vulkan path | pure Rust tests are reusable |
 | Leonida Xbox-ABI proxy | slot/ABI conformance vectors | runtime | Windows/D3D12/Vulkan, does not boot |
