@@ -68,6 +68,12 @@ pub struct Binding {
     pub static_samplers: Vec<[u32; 10]>,
     /// Minimum descriptor-table entries needed per `RootType::Table` root slot: `(slot, count)`.
     pub table_entries: Vec<(u8, usize)>,
+    /// Root slots whose descriptor index is computed rather than a fixed
+    /// table offset: the host must keep the whole table current.
+    pub table_dynamic: Vec<u8>,
+    /// The shader reads descriptors directly from the resource heap (root
+    /// type 5), so it can reach any entry.
+    pub heap: bool,
 }
 
 /// A root view's kind.
@@ -111,6 +117,8 @@ impl Binding {
                 .iter()
                 .map(|&(slot, count)| (slot, count as usize))
                 .collect(),
+            table_dynamic: shader.table_dynamic.clone(),
+            heap: shader.heap,
         }
     }
 

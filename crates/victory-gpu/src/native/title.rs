@@ -130,6 +130,10 @@ pub struct Stats {
     pub waited: u64,
     /// Title textures detiled (again) because their memory changed.
     pub detiles: u64,
+    /// Heaps realized conservatively (whole heap) at encode time.
+    pub realize_whole: u64,
+    /// Heaps realized from analyzed descriptor ranges at encode time.
+    pub realize_ranged: u64,
     /// Textures whose layout the host cannot detile (counted once per content).
     pub undetilable: u64,
 }
@@ -540,6 +544,8 @@ impl<B: PresentBackend> Title<B> {
                     unset_roots = self.host.unset_roots(),
                     no_targets = self.host.no_targets(),
                     passes = self.host.passes(),
+                    realize_whole = self.stats.realize_whole,
+                    realize_ranged = self.stats.realize_ranged,
                     "host textures resident"
                 );
                 tracing::info!(

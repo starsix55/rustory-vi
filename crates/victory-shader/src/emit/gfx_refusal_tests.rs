@@ -162,6 +162,7 @@ pub(super) fn computed_subword_test_shader(op: u32, bounds: u32) -> super::HostS
     }).unwrap();
     super::HostShader {
         stage: HwStage::Cs, dxil: l.dxil, splits: l.splits, table_entries: l.table_entries,
+        table_dynamic: l.table_dynamic,
         user_data: l.user_data, samplers: l.samplers, static_samplers: vec![],
         root_cbvs: l.root_cbvs, root_srvs: l.root_srvs, root_uavs: l.root_uavs,
         memory: l.memory, memory_writes: l.memory_writes, view_addresses: l.view_addresses,
@@ -1214,6 +1215,7 @@ fn guessed_vertex_rebases_a_header_relative_table_alongside_vertex_fetch() {
     wide_code[4] = 0xFA00_0280; // s_load_dwordx4 s[12:15], s[4:5], 640
     let wide_shader = lower(&wide_code, &wide_meta).unwrap();
     assert_eq!(wide_shader.table_entries, [(3, 21)]);
+    assert!(wide_shader.table_dynamic.is_empty(), "all offsets are fixed");
 
     meta[0x25] = 4; // The original absolute interpretation also supports an explicit s4 record.
     assert_eq!(lower(&code, &meta).unwrap().user_data, shader.user_data);

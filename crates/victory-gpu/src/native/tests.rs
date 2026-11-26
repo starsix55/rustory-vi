@@ -698,3 +698,39 @@ fn realize_pending_refuses_a_missing_texture() {
     })
     .unwrap();
 }
+
+/// Fixed table reads realize only their exact range; a dynamic slot forces the
+/// whole heap. This is the host side of the shader's table_dynamic metadata.
+#[test]
+fn descriptor_ranges_narrow_realization_and_dynamic_slots_do_not() {
+    let Some(h) = host() else { return };
+    let views = vec![0u32; 8 * 4];
+    let start = views.as_ptr() as u64;
+    let heap = h.heap(HeapKind::Resource, start, 8).unwrap();
+    let root = vec![Some(super::list::Root::Table(heap.clone(), 3))];
+
+    let fixed = super::list::Binding {
+        table_entries: vec![(0, 2)],
+        table_dynamic: vec![],
+        ..Default::default()
+    };
+    let mut accesses = crate::native::textures::Accesses::default();
+    crate::native::textures::note_binding(&mut accesses, &root, &fixed);
+    assert_eq!(accesses.list.len(), 1);
+    assert!(!accesses.list[0].whole, "a fixed slot does not force the heap");
+    assert_eq!(accesses.list[0].ranges, vec![(3, 5)]);
+
+    let dynamic = super::list::Binding {
+        table_entries: vec![],
+        table_dynamic: vec![0],
+        ..Default::default()
+    };
+    let mut accesses = crate::native::textures::Accesses::default();
+    crate::native::textures::note_binding(&mut accesses, &root, &dynamic);
+    assert_eq!(accesses.list.len(), 1);
+    assert!(accesses.list[0].whole, "a computed index forces the heap");
+
+    h.drop_heap(start);
+    drop(heap);
+    drop(views);
+}

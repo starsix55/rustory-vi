@@ -39,6 +39,9 @@ pub(crate) struct Lowered {
     pub splits: Vec<(u32, u32)>,
     /// Minimum entries needed from each descriptor table root parameter: `(slot, count)`.
     pub table_entries: Vec<(u8, u32)>,
+    /// Root slots whose descriptor index is computed rather than a fixed
+    /// table offset: the host must treat the whole table as reachable.
+    pub table_dynamic: Vec<u8>,
     /// Bit n: immediate sampler n is a comparison sampler.
     pub cmp_samplers: u64,
     pub root_cbvs: Vec<u8>,
@@ -253,6 +256,8 @@ struct Lower<'a> {
     user_reads: BTreeMap<u32, UserData>,
     /// Minimum entries needed from each `RootType::Table` root slot.
     table_entries: BTreeMap<u8, u32>,
+    /// Root slots whose descriptor index is computed rather than fixed.
+    table_dynamic: BTreeSet<u8>,
     /// Handles of root SRVs and UAVs read as bounded views, by user-data
     /// dword ([`Lower::root_view`]).
     root_views: Map<u32, V>,
@@ -780,6 +785,7 @@ impl<'a> Lower<'a> {
             user_data: None,
             user_reads: BTreeMap::new(),
             table_entries: BTreeMap::new(),
+            table_dynamic: BTreeSet::new(),
             root_views: Map::default(),
             samplers: Vec::new(),
             descriptors: x
@@ -1561,9 +1567,11 @@ impl<'a> Lower<'a> {
             }
         }
         let table_entries = self.table_entries.into_iter().collect();
+        let table_dynamic = self.table_dynamic.into_iter().collect();
         Ok(Lowered {
             splits,
             table_entries,
+            table_dynamic,
             cmp_samplers,
             root_cbvs,
             root_srvs,
@@ -7105,6 +7113,17 @@ impl<'a> Lower<'a> {
         }
     }
 
+    /// Records that root slot `param` reads descriptors at computed indices:
+    /// the host must keep the whole table current.
+    fn record_dynamic_table(&mut self, param: usize) {
+        let Some(rp) = self.x.native.layout.get(param) else {
+            return;
+        };
+        if rp.root == RootType::Table {
+            self.table_dynamic.insert(rp.slot);
+        }
+    }
+
     /// [`Lower::heap_index`] of a descriptor at a fixed address
     /// ([`Lower::entry_address`]), in the entry block.
     fn entry_heap_index(&mut self, (param, offset): EntryAddress, first: u8, sampler: bool) -> V {
@@ -7234,6 +7253,8 @@ impl<'a> Lower<'a> {
         }
         if a.dynamic.is_none() {
             self.record_table_entry(a.param, a.offset.wrapping_add(4 * u32::from(first)), sampler);
+        } else {
+            self.record_dynamic_table(a.param);
         }
         let li: &Inst = &self.x.p.blocks[load.0].insts[load.1];
         let Fields::Flat {
@@ -7277,6 +7298,8 @@ impl<'a> Lower<'a> {
         }
         if a.dynamic.is_none() {
             self.record_table_entry(a.param, a.offset.wrapping_add(4 * u32::from(first)), sampler);
+        } else {
+            self.record_dynamic_table(a.param);
         }
         let li: &Inst = &self.x.p.blocks[load.0].insts[load.1];
         let Fields::Smem {

@@ -14,7 +14,7 @@
 
 use super::descriptors::format;
 use super::host::NativeHost;
-use super::list::{Cmd, NativeHeap, NativeList, Root};
+use super::list::{Binding, Cmd, NativeHeap, NativeList, Root};
 use super::title::{Stats, Title};
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -854,10 +854,105 @@ fn upload_key<B: PresentBackend>(
     }
 }
 
-/// Before a list is encoded: refresh descriptor tables, then realize every
-/// pending entry in every heap the list can index and remirror its slot. This
-/// is what makes dynamic indexing correct after a texture was evicted or a
-/// heap entry was repointed at the spare.
+/// One heap's reachable descriptor entries in this list: the whole heap for
+/// computed indices, or the union of fixed ranges the shaders can read.
+pub(super) struct HeapAccess<B: PresentBackend> {
+    pub(super) heap: Rc<NativeHeap<B>>,
+    pub(super) whole: bool,
+    pub(super) ranges: Vec<(usize, usize)>,
+}
+
+impl<B: PresentBackend> HeapAccess<B> {
+    fn covers(&self, index: usize) -> bool {
+        self.whole || self.ranges.iter().any(|&(a, b)| index >= a && index < b)
+    }
+}
+
+pub(super) struct Accesses<B: PresentBackend> {
+    pub(super) list: Vec<HeapAccess<B>>,
+    by_ptr: HashMap<usize, usize>,
+}
+
+impl<B: PresentBackend> Default for Accesses<B> {
+    fn default() -> Self {
+        Accesses {
+            list: Vec::new(),
+            by_ptr: HashMap::new(),
+        }
+    }
+}
+
+impl<B: PresentBackend> Accesses<B> {
+    fn get(&mut self, heap: &Rc<NativeHeap<B>>) -> &mut HeapAccess<B> {
+        let ptr = Rc::as_ptr(heap) as usize;
+        if let Some(&i) = self.by_ptr.get(&ptr) {
+            return &mut self.list[i];
+        }
+        let i = self.list.len();
+        self.list.push(HeapAccess {
+            heap: heap.clone(),
+            whole: false,
+            ranges: Vec::new(),
+        });
+        self.by_ptr.insert(ptr, i);
+        &mut self.list[i]
+    }
+
+    fn whole(&mut self, heap: &Rc<NativeHeap<B>>) {
+        self.get(heap).whole = true;
+    }
+
+    fn range(&mut self, heap: &Rc<NativeHeap<B>>, start: usize, end: usize) {
+        if end > start {
+            self.get(heap).ranges.push((start, end));
+        }
+    }
+}
+
+/// Adds the fixed table ranges a binding reads. Dynamic slots mark the whole
+/// heap reachable; a slot absent from both lists is not read by the shader.
+pub(super) fn note_binding<B: PresentBackend>(
+    accesses: &mut Accesses<B>,
+    root: &[Option<Root<B>>],
+    binding: &Binding,
+) {
+    for &(slot, count) in &binding.table_entries {
+        let Some(Root::Table(heap, at)) = root.get(usize::from(slot)).and_then(|r| r.as_ref()) else {
+            continue;
+        };
+        let end = at.saturating_add(count).min(heap.count);
+        if binding.table_dynamic.contains(&slot) {
+            accesses.whole(heap);
+        } else {
+            accesses.range(heap, *at, end);
+        }
+    }
+    for &slot in &binding.table_dynamic {
+        if let Some(Root::Table(heap, _)) = root.get(usize::from(slot)).and_then(|r| r.as_ref()) {
+            accesses.whole(heap);
+        }
+    }
+    if let Some(ps) = &binding.ps {
+        note_binding(accesses, root, ps);
+    }
+}
+
+fn whole_root_tables<B: PresentBackend>(
+    accesses: &mut Accesses<B>,
+    root: &[Option<Root<B>>],
+) {
+    for r in root.iter().flatten() {
+        if let Root::Table(heap, _) = r {
+            accesses.whole(heap);
+        }
+    }
+}
+
+/// Before a list is encoded: refresh descriptor tables, then realize the
+/// pending entries the list's shaders can actually reach and remirror their
+/// slots. Fixed table accesses narrow the set to their ranges; computed
+/// indices force the whole heap. This keeps dynamic indexing correct without
+/// realizing every texture in a large bound heap.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn realize_pending<B: PresentBackend>(
     host: &NativeHost<B>,
@@ -870,14 +965,9 @@ pub(super) fn realize_pending<B: PresentBackend>(
     submitted: u64,
     lists: &[Rc<NativeList<B>>],
 ) -> Result<Vec<Rc<NativeHeap<B>>>, String> {
-    let mut heaps: Vec<Rc<NativeHeap<B>>> = Vec::new();
-    let mut seen = std::collections::HashSet::new();
+    let conservative = std::env::var_os("VICTORY_CONSERVATIVE_TEXTURES").is_some();
+    let mut accesses = Accesses::default();
     let mut copies: Vec<usize> = Vec::new();
-    let mut add = |h: &Rc<NativeHeap<B>>| {
-        if seen.insert(Rc::as_ptr(h) as usize) {
-            heaps.push(h.clone());
-        }
-    };
     for list in lists {
         for cmd in &list.cmds {
             match cmd {
@@ -888,32 +978,44 @@ pub(super) fn realize_pending<B: PresentBackend>(
                     ..
                 } => {
                     host.remirror_tables(root, binding.as_deref());
-                    if let Some(h) = resource {
-                        add(h);
-                    }
-                    if let Some(h) = sampler {
-                        add(h);
-                    }
-                    for r in root.iter().flatten() {
-                        if let Root::Table(h, _) = r {
-                            add(h);
+                    if conservative || binding.is_none() {
+                        if let Some(h) = resource {
+                            accesses.whole(h);
                         }
+                        if let Some(h) = sampler {
+                            accesses.whole(h);
+                        }
+                        whole_root_tables(&mut accesses, root);
+                    } else if let Some(b) = binding.as_deref() {
+                        if b.heap || b.ps.as_ref().is_some_and(|ps| ps.heap) {
+                            if let Some(h) = resource {
+                                accesses.whole(h);
+                            }
+                            whole_root_tables(&mut accesses, root);
+                        }
+                        note_binding(&mut accesses, root, b);
                     }
                 }
                 Cmd::Dispatch {
                     pso, root, heaps, ..
                 } => {
                     host.remirror_tables(root, pso.binding.as_ref());
-                    if let Some(h) = &heaps.0 {
-                        add(h);
-                    }
-                    if let Some(h) = &heaps.1 {
-                        add(h);
-                    }
-                    for r in root.iter().flatten() {
-                        if let Root::Table(h, _) = r {
-                            add(h);
+                    if conservative || pso.binding.is_none() {
+                        if let Some(h) = &heaps.0 {
+                            accesses.whole(h);
                         }
+                        if let Some(h) = &heaps.1 {
+                            accesses.whole(h);
+                        }
+                        whole_root_tables(&mut accesses, root);
+                    } else if let Some(b) = pso.binding.as_ref() {
+                        if b.heap {
+                            if let Some(h) = &heaps.0 {
+                                accesses.whole(h);
+                            }
+                            whole_root_tables(&mut accesses, root);
+                        }
+                        note_binding(&mut accesses, root, b);
                     }
                 }
                 Cmd::CopyTexture { dst, src } | Cmd::CopyTextureRegion { dst, src, .. } => {
@@ -928,7 +1030,8 @@ pub(super) fn realize_pending<B: PresentBackend>(
     // A command buffer for this list is about to be committed. Entries in
     // these heaps may not be repointed until it completes.
     let frame = crate::frame::current();
-    for heap in &heaps {
+    for access in &accesses.list {
+        let heap = &access.heap;
         heap.last_used.set(frame);
         heap.last_queue.set(queue);
         heap.last_serial.set(submitted.saturating_add(1));
@@ -939,6 +1042,11 @@ pub(super) fn realize_pending<B: PresentBackend>(
                 }
             });
             heap.marked.set(true);
+        }
+        if access.whole {
+            stats.realize_whole += 1;
+        } else {
+            stats.realize_ranged += 1;
         }
     }
 
@@ -957,11 +1065,13 @@ pub(super) fn realize_pending<B: PresentBackend>(
     // pending key, which must be realized before the same submission.
     for _ in 0..2 {
         let mut work: Vec<(Rc<NativeHeap<B>>, usize, usize)> = Vec::new();
-        for heap in &heaps {
-            let keys = heap.keys.borrow();
-            for &index in heap.pending.borrow().iter() {
-                if let Some(&key) = keys.get(&index) {
-                    work.push((heap.clone(), index, key));
+        for access in &accesses.list {
+            let keys = access.heap.keys.borrow();
+            for &index in access.heap.pending.borrow().iter() {
+                if access.covers(index)
+                    && let Some(&key) = keys.get(&index)
+                {
+                    work.push((access.heap.clone(), index, key));
                 }
             }
         }
@@ -978,7 +1088,6 @@ pub(super) fn realize_pending<B: PresentBackend>(
                     ));
                 }
                 upload_key(host, textures, stats, key);
-                progress = true;
             }
             let handle = heap.start + index as u64 * NativeHost::<B>::step(heap.kind);
             match host.mirror(handle) {
@@ -999,16 +1108,22 @@ pub(super) fn realize_pending<B: PresentBackend>(
             break;
         }
     }
-    for heap in &heaps {
-        if let Some(&index) = heap.pending.borrow().iter().next() {
-            let key = heap.keys.borrow().get(&index).copied().unwrap_or(0);
+    for access in &accesses.list {
+        if let Some(&index) = access
+            .heap
+            .pending
+            .borrow()
+            .iter()
+            .find(|&&i| access.covers(i))
+        {
+            let key = access.heap.keys.borrow().get(&index).copied().unwrap_or(0);
             return Err(format!(
                 "heap {:#x} entry {index} (texture {key:#x}) is still a placeholder",
-                heap.start
+                access.heap.start
             ));
         }
     }
-    Ok(heaps)
+    Ok(accesses.list.into_iter().map(|a| a.heap).collect())
 }
 
 /// Makes the host texture of title texture `key` if it has none yet and

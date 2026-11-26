@@ -348,6 +348,9 @@ pub struct HostShader {
     pub splits: Vec<(u32, u32)>,
     /// Minimum descriptor-table entries needed for each `RootType::Table` root slot: `(slot, count)`.
     pub table_entries: Vec<(u8, u32)>,
+    /// Root slots whose descriptor index is computed rather than a fixed
+    /// table offset: the host must treat the whole table as reachable.
+    pub table_dynamic: Vec<u8>,
 }
 
 impl HostShader {
@@ -635,6 +638,7 @@ pub fn emit_with(
         view_marks: l.view_marks,
         splits: l.splits,
         table_entries: l.table_entries,
+        table_dynamic: l.table_dynamic,
     })
 }
 
