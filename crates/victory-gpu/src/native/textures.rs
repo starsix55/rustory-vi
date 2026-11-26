@@ -963,9 +963,11 @@ pub(super) fn realize_pending<B: PresentBackend>(
     stats: &mut Stats,
     queue: usize,
     submitted: u64,
+    ranged: bool,
     lists: &[Rc<NativeList<B>>],
 ) -> Result<Vec<Rc<NativeHeap<B>>>, String> {
-    let conservative = std::env::var_os("VICTORY_CONSERVATIVE_TEXTURES").is_some();
+    let conservative =
+        !ranged || std::env::var_os("VICTORY_CONSERVATIVE_TEXTURES").is_some();
     let mut accesses = Accesses::default();
     let mut copies: Vec<usize> = Vec::new();
     for list in lists {

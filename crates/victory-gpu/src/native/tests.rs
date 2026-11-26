@@ -628,7 +628,7 @@ fn realize_pending_realizes_textures_a_copy_names() {
         } = t;
         assert!(!textures.contains_key(&key));
         crate::native::textures::realize_pending(
-            host, pending, textures, backing, unloaded, &mut stats, 0, 0, &lists,
+            host, pending, textures, backing, unloaded, &mut stats, 0, 0, true, &lists,
         )
         .unwrap();
         assert!(textures.contains_key(&key), "the copy's texture was realized");
@@ -692,7 +692,7 @@ fn realize_pending_refuses_a_missing_texture() {
             ..
         } = t;
         let result = crate::native::textures::realize_pending(
-            host, pending, textures, backing, unloaded, &mut stats, 0, 0, &lists,
+            host, pending, textures, backing, unloaded, &mut stats, 0, 0, true, &lists,
         );
         assert!(result.is_err(), "no placeholder submission");
     })
@@ -817,7 +817,7 @@ fn realize_pending_only_realizes_the_fixed_table_range() {
             ..
         } = t;
         crate::native::textures::realize_pending(
-            host, pending, textures, backing, unloaded, &mut stats, 0, 0, &lists,
+            host, pending, textures, backing, unloaded, &mut stats, 0, 0, true, &lists,
         )
         .unwrap();
         assert!(textures.contains_key(&keys[2]), "in-range entry realized");

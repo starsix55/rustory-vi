@@ -415,6 +415,8 @@ impl<B: PresentBackend> Title<B> {
                 return;
             };
             let (submitted, _) = host.backend.queue_progress(&*q);
+            let ranged = std::env::var_os("VICTORY_RANGED_TEXTURES").is_some()
+                && std::env::var_os("VICTORY_CONSERVATIVE_TEXTURES").is_none();
             let heaps = match super::textures::realize_pending(
                 host,
                 pending,
@@ -424,6 +426,7 @@ impl<B: PresentBackend> Title<B> {
                 stats,
                 queue,
                 submitted,
+                ranged,
                 &lists,
             ) {
                 Ok(heaps) => heaps,
