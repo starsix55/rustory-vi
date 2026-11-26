@@ -1,5 +1,8 @@
 blank_issues_enabled: true
 contact_links:
-  - name: Open problems and where to start
-    url: https://github.com/LakshanSivakumar/Native-Victory-macOS/blob/main/docs/ROADMAP.md
+  - name: Chat on Discord
+    url: https://discord.gg/E65kyCNgSS
+    about: Quick questions, show and tell, or find someone to pair with.
+  - name: Roadmap and where to start
+    url: https://github.com/starsix55/rustory-vi/blob/main/ROADMAP.md
     about: Read this before picking something to work on.

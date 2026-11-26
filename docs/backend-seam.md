@@ -120,7 +120,7 @@ The drawable layer and presentation. Presentation never waits for the GPU.
 ## Rules for integrating a fix
 
 1. Search the upstream repository, forks, branches and PRs first. Record the
-   URL/commit in this document or in `experiments/README.md`.
+   URL/commit in this document.
 2. Port the implementation, not just the idea, when the languages and
    backends match. If they do not, state the invariant and write a test.
 3. Add a synthetic test at the seam. A fix that only works in a full game run

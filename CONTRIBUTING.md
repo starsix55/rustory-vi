@@ -1,6 +1,26 @@
-# Contributing to Native VIctory for macOS
+# Contributing to Rustory VI
 
 Thanks for helping. The goal: GTA VI running natively on an Apple Silicon Mac, from a copy the player owns. There is work for testers, Rust programmers, graphics people, reverse engineers and compiler people.
+
+## Pick your size
+
+1. **Five minutes:** run it and file a [tester report](https://github.com/starsix55/rustory-vi/issues/new?template=tester-report.yml), or fix a typo.
+2. **An evening:** take a [good first issue](https://github.com/starsix55/rustory-vi/labels/good%20first%20issue).
+3. **Something bigger:** pick it from the [roadmap](ROADMAP.md) and say so in the issue first, so two people don't do the same work. Quick questions are welcome on [Discord](https://discord.gg/E65kyCNgSS).
+
+## Stay anonymous if you like
+
+Nobody needs your real name or email here. Use GitHub's private address for your commits:
+
+```bash
+git config user.name "your-handle"
+```
+
+```bash
+git config user.email "<id>+your-handle@users.noreply.github.com"
+```
+
+Your exact address is on [github.com/settings/emails](https://github.com/settings/emails). Tick "Keep my email addresses private" and "Block command line pushes that expose my email" there. If you want a different handle for this project than your usual one, a separate GitHub account is fine.
 
 ## The one rule
 
