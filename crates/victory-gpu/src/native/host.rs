@@ -279,6 +279,7 @@ impl<B: GraphicsBackend> NativeHost<B> {
             table: Default::default(),
             mirrored: Default::default(),
             keys: Default::default(),
+            last_used: Default::default(),
         });
         self.heaps.borrow_mut().push(heap.clone());
         Ok(heap)
@@ -310,6 +311,24 @@ impl<B: GraphicsBackend> NativeHost<B> {
     /// entries name each. Snapshot for the residency report.
     pub fn heap_texture_refs(&self) -> HashMap<usize, usize> {
         self.heap_refs.borrow().clone()
+    }
+
+    /// Heaps no draw, dispatch, descriptor write or table check has named for
+    /// `age` frames: `(heaps, entries, texture keys)`. A diagnostic: an idle
+    /// heap may still be live and is not reclaimed by this call.
+    pub fn stale_heaps(&self, age: u64) -> (usize, usize, Vec<usize>) {
+        let now = crate::frame::current();
+        let (mut heaps, mut entries, mut keys) = (0, 0, Vec::new());
+        for h in self.heaps.borrow().iter() {
+            if now.saturating_sub(h.last_used.get()) < age {
+                continue;
+            }
+            heaps += 1;
+            let k = h.keys.borrow();
+            entries += k.len();
+            keys.extend(k.values().copied());
+        }
+        (heaps, entries, keys)
     }
 
     /// Records that heap entry `index` now names title texture `key` (or no
@@ -368,6 +387,7 @@ impl<B: GraphicsBackend> NativeHost<B> {
         let Some((heap, index)) = found else {
             return Ok(false);
         };
+        heap.last_used.set(crate::frame::current());
         let Some(view) = crate::descriptor::view(handle) else {
             return Ok(false);
         };
@@ -431,6 +451,7 @@ impl<B: GraphicsBackend> NativeHost<B> {
     fn remirror_tables(&self, root: &[Option<Root<B>>], binding: Option<&Binding>) {
         for (slot, r) in root.iter().enumerate() {
             let Some(Root::Table(h, at)) = r else { continue };
+            h.last_used.set(crate::frame::current());
             let check = table_check_count(slot, binding, Self::TABLE_CHECK);
             for index in *at..(*at + check).min(h.count) {
                 let handle = h.start + index as u64 * Self::step(h.kind);
@@ -643,6 +664,7 @@ impl<B: GraphicsBackend> NativeHost<B> {
             table: Default::default(),
             mirrored: Default::default(),
             keys: Default::default(),
+            last_used: Default::default(),
         });
         self.contract.borrow_mut().heap = Some(heap.clone());
         Ok(heap)

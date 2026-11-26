@@ -518,6 +518,19 @@ impl<B: PresentBackend> Title<B> {
                     "host memory"
                 );
                 let (kinds, top) = self.breakdown();
+                for age in [60u64, 600] {
+                    let (heaps, entries, keys) = self.host.stale_heaps(age);
+                    let bytes = self.stale_bytes(&keys);
+                    tracing::info!(
+                        frame,
+                        age,
+                        heaps,
+                        entries,
+                        keys = keys.len(),
+                        bytes,
+                        "idle descriptor heaps"
+                    );
+                }
                 for (kind, keys, kind_bytes) in kinds {
                     tracing::info!(frame, kind, keys, bytes = kind_bytes, "host textures by kind");
                 }

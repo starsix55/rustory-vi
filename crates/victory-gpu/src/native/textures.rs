@@ -503,6 +503,20 @@ impl<B: PresentBackend> Title<B> {
         (multi, extra_keys, extra_bytes, overlap_bytes)
     }
 
+    /// Title bytes of the given keys, counting each backing image once.
+    pub fn stale_bytes(&self, keys: &[usize]) -> usize {
+        let mut seen = std::collections::HashSet::new();
+        let mut bytes = 0;
+        for key in keys {
+            if let Some(t) = self.textures.get(key)
+                && seen.insert(Rc::as_ptr(&t.texture) as usize)
+            {
+                bytes += t.info.size;
+            }
+        }
+        bytes
+    }
+
     /// Keys of host textures per backing image.
     fn holders(&self) -> HashMap<usize, usize> {
         let mut holders: HashMap<usize, usize> = HashMap::new();

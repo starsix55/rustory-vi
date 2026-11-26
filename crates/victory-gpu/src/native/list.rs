@@ -25,6 +25,10 @@ pub struct NativeHeap<B: GraphicsBackend> {
     pub mirrored: std::cell::RefCell<std::collections::HashMap<usize, [u8; 12]>>,
     /// The title texture key each entry names, when it names one.
     pub keys: std::cell::RefCell<std::collections::HashMap<usize, usize>>,
+    /// The last frame a draw, dispatch, descriptor write or table check named
+    /// this heap. Entries of a heap idle for many frames are candidates for
+    /// reclamation, not proof that they are dead.
+    pub last_used: std::cell::Cell<u64>,
 }
 
 /// How a translated title shader's arguments are laid out (`victory_shader::emit::HostShader`):
@@ -478,6 +482,13 @@ impl<B: GraphicsBackend> NativeList<B> {
         resource: Option<&Rc<NativeHeap<B>>>,
         sampler: Option<&Rc<NativeHeap<B>>>,
     ) {
+        let frame = crate::frame::current();
+        if let Some(h) = resource {
+            h.last_used.set(frame);
+        }
+        if let Some(h) = sampler {
+            h.last_used.set(frame);
+        }
         self.state.heaps = (resource.cloned(), sampler.cloned());
     }
 
@@ -547,6 +558,9 @@ impl<B: GraphicsBackend> NativeList<B> {
             slot,
             Root::Table(heap.clone(), index),
         );
+        if slot < MAX_ROOT_SLOTS {
+            heap.last_used.set(crate::frame::current());
+        }
     }
 
     pub fn set_graphics_root_constants(&mut self, slot: usize, words: &[u32]) {
@@ -567,6 +581,9 @@ impl<B: GraphicsBackend> NativeList<B> {
             slot,
             Root::Table(heap.clone(), index),
         );
+        if slot < MAX_ROOT_SLOTS {
+            heap.last_used.set(crate::frame::current());
+        }
     }
 
     /// `Dispatch`. Needs the compute pipeline set.
