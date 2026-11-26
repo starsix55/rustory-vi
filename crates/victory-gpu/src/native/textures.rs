@@ -1045,8 +1045,13 @@ pub(super) fn realize_pending<B: PresentBackend>(
         }
         if access.whole {
             stats.realize_whole += 1;
+            stats.realize_conservative += heap.pending.borrow().len() as u64;
         } else {
             stats.realize_ranged += 1;
+            let pending = heap.pending.borrow();
+            let covered = pending.iter().filter(|&&i| access.covers(i)).count();
+            stats.realize_required += covered as u64;
+            stats.realize_deferred += pending.len().saturating_sub(covered) as u64;
         }
     }
 

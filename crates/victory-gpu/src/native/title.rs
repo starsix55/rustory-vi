@@ -134,6 +134,12 @@ pub struct Stats {
     pub realize_whole: u64,
     /// Heaps realized from analyzed descriptor ranges at encode time.
     pub realize_ranged: u64,
+    /// Pending textures realized because a fixed descriptor range named them.
+    pub realize_required: u64,
+    /// Pending textures realized only because a computed index forced the heap.
+    pub realize_conservative: u64,
+    /// Pending textures left for a later command because no analyzed range named them.
+    pub realize_deferred: u64,
     /// Textures whose layout the host cannot detile (counted once per content).
     pub undetilable: u64,
 }
@@ -554,6 +560,9 @@ impl<B: PresentBackend> Title<B> {
                     passes = self.host.passes(),
                     realize_whole = self.stats.realize_whole,
                     realize_ranged = self.stats.realize_ranged,
+                    realize_required = self.stats.realize_required,
+                    realize_conservative = self.stats.realize_conservative,
+                    realize_deferred = self.stats.realize_deferred,
                     "host textures resident"
                 );
                 tracing::info!(
