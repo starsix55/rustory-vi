@@ -395,6 +395,47 @@ pub(crate) fn present(queue: This, resource: This) {
         }
         _ => {}
     }
+    dump_frame_at();
+}
+
+/// `VICTORY_FRAME_DUMP_AT=<frame>,<file.ppm>`: save the presented frame at
+/// exactly that simulation frame, once. Unlike a wall-clock timer this gives
+/// conservative and selective runs the same state to compare.
+fn dump_frame_at() {
+    static TARGET: OnceLock<Option<(u64, String)>> = OnceLock::new();
+    static DONE: AtomicBool = AtomicBool::new(false);
+    if DONE.load(Ordering::Relaxed) {
+        return;
+    }
+    let Some((at, path)) = TARGET
+        .get_or_init(|| {
+            std::env::var("VICTORY_FRAME_DUMP_AT")
+                .ok()
+                .and_then(|v| {
+                    let (frame, path) = v.split_once(',')?;
+                    Some((frame.parse().ok()?, path.to_owned()))
+                })
+        })
+        .as_ref()
+    else {
+        return;
+    };
+    if frames_presented() != *at {
+        return;
+    }
+    if DONE.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    if let Some((w, h, bgra)) = last_frame() {
+        let mut out = format!("P6\n{w} {h}\n255\n").into_bytes();
+        out.extend(bgra.chunks_exact(4).flat_map(|p| [p[2], p[1], p[0]]));
+        match std::fs::write(path, out) {
+            Ok(()) => tracing::warn!(frame = at, w, h, path, "frame saved at frame"),
+            Err(e) => tracing::warn!(frame = at, path, error = %e, "frame capture failed"),
+        }
+    } else {
+        tracing::warn!(frame = at, "frame capture had no presented texture");
+    }
 }
 
 /// Frames presented to the layer so far.
